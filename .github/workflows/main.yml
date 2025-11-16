@@ -17,26 +17,23 @@ jobs:
         arch: "win64_msvc2019_64"
         modules: "qtwebengine"
 
-    - name: Install dependencies
+    - name: Install dependencies (mpv, ninja, stage redist)
       shell: bash
       run: |
         set -e
         mkdir -p build
 
-        # VC++ Redistributable: download and stage inside bundle/win
+        # VC++ redist: download and stage alongside Bundle.wxs
         curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
         mkdir -p bundle/win
         cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
-
-        # Rewrite any hardcoded VS path in Bundle.wxs to the local file
-        sed -i -E 's#C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\(2019|2022)\\\\BuildTools\\\\VC\\\\Redist\\\\MSVC\\\\[^"\\\\]+\\\\vcredist_x64\\.exe#vcredist_x64.exe#g' bundle/win/Bundle.wxs
 
         # Ninja
         curl -L https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip -o ninja.zip
         unzip -o ninja.zip
         mv -f ninja.exe build/
 
-        # mpv dev (x86_64-v3 2025-11-16)
+        # mpv dev (x86_64-v3, 2025-11-16)
         curl -L "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20251116-git-701201b.7z/download" -o mpv.7z
         7z x mpv.7z
         mkdir -p mpv
@@ -47,28 +44,14 @@ jobs:
         mv mpv.def libmpv.dll.a mpv/
         mv mpv build/
 
-    - name: Build
-      shell: cmd
+    - name: Patch WiX Bundle.wxs redist path (PowerShell)
+      shell: pwsh
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        cd build
-        set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin;%CD%
-        cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=output -DCMAKE_MAKE_PROGRAM=ninja.exe -DQTROOT=%Qt5_DIR% -DMPV_INCLUDE_DIR=mpv/include -DMPV_LIBRARY=mpv/libmpv-2.dll -DCMAKE_INSTALL_PREFIX=output ..
-        lib /def:mpv\mpv.def /out:mpv\libmpv-2.dll.lib /MACHINE:X64
-        ninja
-        ninja install
-
-        rem Resolve Qt bin path from Qt5_DIR (points to lib\cmake)
-        for %%I in ("%Qt5_DIR%\..\..") do set QTBIN=%%~fI\bin
-
-        rem Deploy Qt runtime and required QML modules (QtQuick, WebEngine, WebChannel, Controls)
-        %QTBIN%\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
-
-        rem Build MSI/EXE (WiX harvest will include files from build/output and bundle/win base path)
-        ninja windows_package
-
-    - name: Archive installer
-      uses: actions/upload-artifact@v4
-      with:
-        name: windows
-        path: ${{ github.workspace }}/build/JellyfinMediaPlayer-*.exe
+        $bundle = "bundle/win/Bundle.wxs"
+        $content = Get-Content -Raw $bundle
+        # Replace any VS 2019/2022 MSVC redist absolute path with local file name
+        $regex = 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe'
+        $new = $content -replace $regex, 'vcredist_x64.exe'
+        Set-Content -LiteralPath $bundle -Value $new -Encoding UTF8
+        # Show confirmation
+        Select-String -Path $bundle -Pattern 'vcredist_x64
