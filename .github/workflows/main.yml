@@ -23,7 +23,7 @@ jobs:
         set -e
         mkdir -p build
 
-        # VC++ Redistributable (stage next to Bundle.wxs for WiX light -b)
+        # VC++ Redistributable: stage beside Bundle.wxs so WiX light -b resolves it
         curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
         mkdir -p bundle/win
         cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
@@ -56,12 +56,16 @@ jobs:
           throw "Bundle patch failed: vcredist_x64.exe not found in Bundle.wxs"
         }
 
-    - name: Install OpenSSL 1.1 runtime (for Qt 5.15 TLS)
+    - name: Fetch OpenSSL 1.1 (silent install) for Qt 5.15 TLS
       shell: pwsh
       run: |
-        choco install openssl11 -y --no-progress
-        $bin = "${env:ProgramFiles}\OpenSSL-Win64\bin"
-        if (-not (Test-Path "$bin\libssl-1_1-x64.dll")) { throw "OpenSSL 1.1 not found at $bin" }
+        $uri = "https://slproweb.com/download/Win64OpenSSL-1_1_1w.exe"
+        $dst = "$env:RUNNER_TEMP\Win64OpenSSL-1_1_1w.exe"
+        Invoke-WebRequest -Uri $uri -OutFile $dst -UseBasicParsing
+        & $dst /verysilent /silent /sp- /suppressmsgboxes /nocancel /norestart /DIR="C:\OpenSSL-Win64"
+        $bin = "C:\OpenSSL-Win64\bin"
+        if (-not (Test-Path "$bin\libssl-1_1-x64.dll")) { throw "OpenSSL 1.1 install missing libssl-1_1-x64.dll at $bin" }
+        if (-not (Test-Path "$bin\libcrypto-1_1-x64.dll")) { throw "OpenSSL 1.1 install missing libcrypto-1_1-x64.dll at $bin" }
 
     - name: Build
       shell: cmd
@@ -69,7 +73,7 @@ jobs:
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         cd build
 
-        rem Robust WiX bin detection
+        rem Prefer WiX 3.14, fallback to 3.11
         set WIXBIN=C:\Program Files (x86)\WiX Toolset v3.14\bin
         if not exist "%WIXBIN%\light.exe" set WIXBIN=C:\Program Files (x86)\WiX Toolset v3.11\bin
         set PATH=%PATH%;%WIXBIN%;%CD%
@@ -79,17 +83,14 @@ jobs:
         ninja
         ninja install
 
-        rem Locate Qt bin
         for %%I in ("%Qt5_DIR%\..\..") do set QTBIN=%%~fI\bin
-
-        rem Deploy Qt runtime + QML (QtQuick, WebEngine, WebChannel, Controls, etc.)
         %QTBIN%\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
 
-        rem Bundle OpenSSL 1.1 DLLs for QtNetwork TLS (fixes QSslSocket TLS init failures)
-        copy "%ProgramFiles%\OpenSSL-Win64\bin\libssl-1_1-x64.dll" output\ /Y
-        copy "%ProgramFiles%\OpenSSL-Win64\bin\libcrypto-1_1-x64.dll" output\ /Y
+        rem Bundle OpenSSL 1.1 DLLs alongside the app so QtNetwork TLS initializes
+        copy "C:\OpenSSL-Win64\bin\libssl-1_1-x64.dll"   output\ /Y
+        copy "C:\OpenSSL-Win64\bin\libcrypto-1_1-x64.dll" output\ /Y
 
-        rem Package MSI + EXE; light -b uses bundle/win where vcredist_x64.exe lives
+        rem Package MSI/EXE; light -b picks vcredist_x64.exe from bundle/win
         ninja windows_package
 
     - name: Archive installer
