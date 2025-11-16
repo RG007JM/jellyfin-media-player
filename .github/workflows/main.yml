@@ -2,17 +2,20 @@ name: build
 
 on:
   workflow_dispatch:
+
 jobs:
   build-win64:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
+
     - name: Install Qt 5.15.2
       uses: jurplel/install-qt-action@v4
       with:
         version: "5.15.2"
         arch: "win64_msvc2019_64"
         modules: "qtwebengine"
+
     - name: Install dependencies
       run: |
         mkdir build
@@ -31,6 +34,7 @@ jobs:
         mv mpv.def libmpv.dll.a mpv/
         mv mpv build/
       shell: bash
+
     - name: Build
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
@@ -40,10 +44,25 @@ jobs:
         lib /def:mpv\mpv.def /out:mpv\libmpv-2.dll.lib /MACHINE:X64
         ninja
         ninja install
+
+        rem Find Qt bin properly from Qt5_DIR (which points to lib\cmake)
         for %%I in ("%Qt5_DIR%\..\..") do set QTBIN=%%~fI\bin
+
+        rem Deploy Qt runtime + QML modules used by Jellyfin
         %QTBIN%\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
+
+        rem Create Safe Mode launcher that forces software rendering and disables GPU compositing
+        echo @echo off> output\JellyfinMediaPlayer-SafeMode.cmd
+        echo set "QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu --disable-gpu-compositing --ignore-gpu-blocklist --disable-features=UseSkiaRenderer">> output\JellyfinMediaPlayer-SafeMode.cmd
+        echo set "QT_OPENGL=software">> output\JellyfinMediaPlayer-SafeMode.cmd
+        echo set "QSG_RENDER_LOOP=basic">> output\JellyfinMediaPlayer-SafeMode.cmd
+        echo set "QT_ANGLE_PLATFORM=warp">> output\JellyfinMediaPlayer-SafeMode.cmd
+        echo start "" "JellyfinMediaPlayer.exe">> output\JellyfinMediaPlayer-SafeMode.cmd
+
+        rem Package the installer
         ninja windows_package
       shell: cmd
+
     - name: Archive production artifacts
       uses: actions/upload-artifact@v4
       with:
