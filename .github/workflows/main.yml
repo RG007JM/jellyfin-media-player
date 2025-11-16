@@ -56,16 +56,59 @@ jobs:
           throw "Bundle patch failed: vcredist_x64.exe not found in Bundle.wxs"
         }
 
-    - name: Fetch OpenSSL 1.1 (silent install) for Qt 5.15 TLS
+    - name: Install OpenSSL 1.1 (silent) and copy DLLs for Qt TLS
       shell: pwsh
       run: |
+        # Download a stable OpenSSL 1.1.1w installer (required by Qt 5.15)
         $uri = "https://slproweb.com/download/Win64OpenSSL-1_1_1w.exe"
         $dst = "$env:RUNNER_TEMP\Win64OpenSSL-1_1_1w.exe"
         Invoke-WebRequest -Uri $uri -OutFile $dst -UseBasicParsing
-        & $dst /verysilent /silent /sp- /suppressmsgboxes /nocancel /norestart /DIR="C:\OpenSSL-Win64"
-        $bin = "C:\OpenSSL-Win64\bin"
-        if (-not (Test-Path "$bin\libssl-1_1-x64.dll")) { throw "OpenSSL 1.1 install missing libssl-1_1-x64.dll at $bin" }
-        if (-not (Test-Path "$bin\libcrypto-1_1-x64.dll")) { throw "OpenSSL 1.1 install missing libcrypto-1_1-x64.dll at $bin" }
+
+        # Run silent install (no hardcoded DIR to avoid path mismatches on runner)
+        & $dst /verysilent /silent /sp- /suppressmsgboxes /nocancel /norestart | Out-Null
+
+        # Detect install path from registry, then fall back to common locations
+        $regPaths = @(
+          "HKLM:\SOFTWARE\OpenSSL\OpenSSL-Win64",
+          "HKLM:\SOFTWARE\WOW6432Node\OpenSSL\OpenSSL-Win64"
+        )
+        $installPath = $null
+        foreach ($rp in $regPaths) {
+          if (Test-Path $rp) {
+            try {
+              $ip = (Get-ItemProperty -LiteralPath $rp -ErrorAction Stop).InstallPath
+              if ($ip -and (Test-Path $ip)) { $installPath = $ip; break }
+            } catch { }
+          }
+        }
+        if (-not $installPath) {
+          $candidates = @(
+            "C:\Program Files\OpenSSL-Win64",
+            "C:\OpenSSL-Win64",
+            "C:\Program Files (x86)\OpenSSL-Win64"
+          )
+          foreach ($c in $candidates) {
+            if (Test-Path $c) { $installPath = $c; break }
+          }
+        }
+        if (-not $installPath) {
+          # Last-resort search if installer changed defaults
+          $match = Get-ChildItem -Path "C:\" -Include "libssl-1_1-x64.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($match) { $installPath = (Split-Path -Path $match.FullName -Parent) -replace '\\bin$','' }
+        }
+        if (-not $installPath) { throw "OpenSSL 1.1 install path not found after silent install" }
+
+        $bin = Join-Path $installPath "bin"
+        $ssl = Join-Path $bin "libssl-1_1-x64.dll"
+        $cry = Join-Path $bin "libcrypto-1_1-x64.dll"
+        if (-not (Test-Path $ssl)) { throw "Missing $ssl" }
+        if (-not (Test-Path $cry)) { throw "Missing $cry" }
+
+        # Copy next to the app so QtNetwork can load TLS at runtime
+        $out = "$env:GITHUB_WORKSPACE\build\output"
+        New-Item -ItemType Directory -Force -Path $out | Out-Null
+        Copy-Item $ssl $out -Force
+        Copy-Item $cry $out -Force
 
     - name: Build
       shell: cmd
@@ -85,10 +128,6 @@ jobs:
 
         for %%I in ("%Qt5_DIR%\..\..") do set QTBIN=%%~fI\bin
         %QTBIN%\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
-
-        rem Bundle OpenSSL 1.1 DLLs alongside the app so QtNetwork TLS initializes
-        copy "C:\OpenSSL-Win64\bin\libssl-1_1-x64.dll"   output\ /Y
-        copy "C:\OpenSSL-Win64\bin\libcrypto-1_1-x64.dll" output\ /Y
 
         rem Package MSI/EXE; light -b picks vcredist_x64.exe from bundle/win
         ninja windows_package
