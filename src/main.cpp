@@ -203,6 +203,9 @@ int main(int argc, char *argv[])
       qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu-compositing --ignore-gpu-blocklist");
     }
 
+    // CRITICAL: Initialize QtWebEngine BEFORE QApplication to avoid deprecation warnings
+    QtWebEngine::initialize();
+
     // Real GUI app
     QApplication app(newArgc, newArgv);
 
@@ -239,9 +242,6 @@ int main(int argc, char *argv[])
     ComponentManager::Get().initialize();
     Log::ApplyConfigLogLevel();
     SettingsComponent::Get().setCommandLineValues(parser.optionNames());
-
-    // IMPORTANT: Initialize WebEngine EARLY (after QApplication, before any QML/engine/view)
-    QtWebEngine::initialize();
 
     // Configure QtWebEngine paths
     QString configDir = parser.value("config-dir");
