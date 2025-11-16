@@ -41,7 +41,7 @@ jobs:
         ninja
         ninja install
         for %%I in ("%Qt5_DIR%\..\..") do set QTBIN=%%~fI\bin
-        %QTBIN%\windeployqt.exe --release output\JellyfinMediaPlayer.exe
+        %QTBIN%\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
         ninja windows_package
       shell: cmd
     - name: Archive production artifacts
