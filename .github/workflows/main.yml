@@ -56,59 +56,68 @@ jobs:
           throw "Bundle patch failed: vcredist_x64.exe not found in Bundle.wxs"
         }
 
-    - name: Install OpenSSL 1.1 (silent) and copy DLLs for Qt TLS
+   # Fast & reliable OpenSSL 1.1.1w provisioning with cache + mirrored fallbacks
+    - name: Cache OpenSSL 1.1.1w DLLs
+      uses: actions/cache@v4
+      with:
+        path: build/openssl-cache
+        key: openssl-1.1.1w-x64-dlls
+    
+    - name: Provide OpenSSL 1.1 DLLs
       shell: pwsh
       run: |
-        # Download a stable OpenSSL 1.1.1w installer (required by Qt 5.15)
-        $uri = "https://slproweb.com/download/Win64OpenSSL-1_1_1w.exe"
-        $dst = "$env:RUNNER_TEMP\Win64OpenSSL-1_1_1w.exe"
-        Invoke-WebRequest -Uri $uri -OutFile $dst -UseBasicParsing
-
-        # Run silent install (no hardcoded DIR to avoid path mismatches on runner)
-        & $dst /verysilent /silent /sp- /suppressmsgboxes /nocancel /norestart | Out-Null
-
-        # Detect install path from registry, then fall back to common locations
-        $regPaths = @(
-          "HKLM:\SOFTWARE\OpenSSL\OpenSSL-Win64",
-          "HKLM:\SOFTWARE\WOW6432Node\OpenSSL\OpenSSL-Win64"
-        )
-        $installPath = $null
-        foreach ($rp in $regPaths) {
-          if (Test-Path $rp) {
+        $cache = "$env:GITHUB_WORKSPACE\build\openssl-cache"
+        $out   = "$env:GITHUB_WORKSPACE\build\output"
+        New-Item -ItemType Directory -Force -Path $cache,$out | Out-Null
+    
+        $ssl = Join-Path $cache "libssl-1_1-x64.dll"
+        $cry = Join-Path $cache "libcrypto-1_1-x64.dll"
+        if (Test-Path $ssl -and Test-Path $cry) {
+          Copy-Item $ssl $out -Force
+          Copy-Item $cry $out -Force
+          exit 0
+        }
+    
+        # Parallel mirrored downloads of the installer; first success wins
+        $vers = @("w","v","u")
+        $jobs = @()
+        foreach ($v in $vers) {
+          $url = "https://slproweb.com/download/Win64OpenSSL-1_1_1$($v).exe"
+          $dst = "$env:RUNNER_TEMP\Win64OpenSSL-1_1_1$($v).exe"
+          $jobs += Start-Job -ScriptBlock {
+            param($u,$d)
             try {
-              $ip = (Get-ItemProperty -LiteralPath $rp -ErrorAction Stop).InstallPath
-              if ($ip -and (Test-Path $ip)) { $installPath = $ip; break }
-            } catch { }
-          }
+              Invoke-WebRequest -Uri $u -OutFile $d -UseBasicParsing -TimeoutSec 300 -MaximumRedirection 5
+              if (Test-Path $d) { return $d } else { return $null }
+            } catch { return $null }
+          } -ArgumentList $url,$dst
         }
-        if (-not $installPath) {
-          $candidates = @(
-            "C:\Program Files\OpenSSL-Win64",
-            "C:\OpenSSL-Win64",
-            "C:\Program Files (x86)\OpenSSL-Win64"
-          )
-          foreach ($c in $candidates) {
-            if (Test-Path $c) { $installPath = $c; break }
-          }
-        }
-        if (-not $installPath) {
-          # Last-resort search if installer changed defaults
-          $match = Get-ChildItem -Path "C:\" -Include "libssl-1_1-x64.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($match) { $installPath = (Split-Path -Path $match.FullName -Parent) -replace '\\bin$','' }
-        }
-        if (-not $installPath) { throw "OpenSSL 1.1 install path not found after silent install" }
-
-        $bin = Join-Path $installPath "bin"
-        $ssl = Join-Path $bin "libssl-1_1-x64.dll"
-        $cry = Join-Path $bin "libcrypto-1_1-x64.dll"
-        if (-not (Test-Path $ssl)) { throw "Missing $ssl" }
-        if (-not (Test-Path $cry)) { throw "Missing $cry" }
-
-        # Copy next to the app so QtNetwork can load TLS at runtime
-        $out = "$env:GITHUB_WORKSPACE\build\output"
-        New-Item -ItemType Directory -Force -Path $out | Out-Null
-        Copy-Item $ssl $out -Force
-        Copy-Item $cry $out -Force
+    
+        $done = Wait-Job -Job $jobs -Any -Timeout 360
+        if (-not $done) { throw "Timed out downloading OpenSSL installer from mirrors" }
+        $path = Receive-Job $done | Select-Object -Last 1
+        $jobs | Remove-Job -Force
+    
+        if (-not $path -or -not (Test-Path $path)) { throw "Failed to download any OpenSSL 1.1.1 installer" }
+    
+        # Extract DLLs from installer with 7z (already on runner)
+        $dir = "$env:RUNNER_TEMP\openssl111"
+        if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        & 7z x -y -o"$dir" "$path" | Out-Null
+    
+        $sslFound = Get-ChildItem -Path $dir -Recurse -Filter "libssl-1_1-x64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+        $cryFound = Get-ChildItem -Path $dir -Recurse -Filter "libcrypto-1_1-x64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $sslFound -or -not $cryFound) { throw "Could not locate OpenSSL 1.1 DLLs inside installer" }
+    
+        Copy-Item $sslFound.FullName $cache -Force
+        Copy-Item $cryFound.FullName $cache -Force
+        Copy-Item $sslFound.FullName $out   -Force
+        Copy-Item $cryFound.FullName $out   -Force
+    
+        # Sanity check
+        if (-not (Test-Path "$out\libssl-1_1-x64.dll"))    { throw "Missing libssl-1_1-x64.dll" }
+        if (-not (Test-Path "$out\libcrypto-1_1-x64.dll")) { throw "Missing libcrypto-1_1-x64.dll" }
 
     - name: Build
       shell: cmd
