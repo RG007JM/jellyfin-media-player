@@ -20,15 +20,26 @@ jobs:
     - name: Install dependencies
       shell: bash
       run: |
-        mkdir build
-        curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe > vc_redist.x64.exe
-        sed -i 's#C:\\\\Program Files (x86)\\\\Microsoft Visual Studio\\\\2019\\\\BuildTools\\\\VC\\\\Redist\\\\MSVC\\\\v142\\\\vcredist_x64.exe#'"$(readlink -f vc_redist.x64.exe | sed 's#/\([a-z]\)/#\1:\\#g' | tr '/' '\\' | sed 's/\\/\\\\/g')#g" bundle/win/Bundle.wxs
-        curl -L https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip > ninja.zip
+        set -e
+        mkdir -p build
+
+        # VC++ Redistributable: download and stage inside bundle/win
+        curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
+        mkdir -p bundle/win
+        cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
+
+        # Rewrite any hardcoded VS path in Bundle.wxs to the local file
+        sed -i -E 's#C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\(2019|2022)\\\\BuildTools\\\\VC\\\\Redist\\\\MSVC\\\\[^"\\\\]+\\\\vcredist_x64\\.exe#vcredist_x64.exe#g' bundle/win/Bundle.wxs
+
+        # Ninja
+        curl -L https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip -o ninja.zip
         unzip -o ninja.zip
-        mv ninja.exe build/
-        curl -L "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20251116-git-701201b.7z/download" > mpv.7z
+        mv -f ninja.exe build/
+
+        # mpv dev (x86_64-v3 2025-11-16)
+        curl -L "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20251116-git-701201b.7z/download" -o mpv.7z
         7z x mpv.7z
-        mkdir mpv
+        mkdir -p mpv
         mv include mpv
         gendef libmpv-2.dll
         mv libmpv-2.dll mpv/libmpv-2.dll
@@ -47,9 +58,13 @@ jobs:
         ninja
         ninja install
 
+        rem Resolve Qt bin path from Qt5_DIR (points to lib\cmake)
         for %%I in ("%Qt5_DIR%\..\..") do set QTBIN=%%~fI\bin
+
+        rem Deploy Qt runtime and required QML modules (QtQuick, WebEngine, WebChannel, Controls)
         %QTBIN%\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
 
+        rem Build MSI/EXE (WiX harvest will include files from build/output and bundle/win base path)
         ninja windows_package
 
     - name: Archive installer
