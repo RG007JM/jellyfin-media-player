@@ -1,12 +1,6 @@
 name: build
 
 on:
-  push:
-    branches:
-      - release
-      - prerelease
-      - test
-      - master
   workflow_dispatch:
 jobs:
   build-win64:
