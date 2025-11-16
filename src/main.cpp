@@ -22,11 +22,15 @@
 #include "settings/SettingsComponent.h"
 #include "settings/SettingsSection.h"
 #include "ui/KonvergoWindow.h"
-#include "ui/KonvergoWindow.h"
 #include "Globals.h"
 #include "ui/ErrorMessage.h"
 #include "UniqueApplication.h"
 #include "utils/Log.h"
+
+// GPU-stable additions
+#include <QSurfaceFormat>
+#include <QQuickWindow>
+#include <QtWebEngine/QtWebEngine>
 
 #ifdef Q_OS_MAC
 #include "PFMoveApplication.h"
@@ -44,10 +48,11 @@ static void preinitQt()
   QCoreApplication::setOrganizationDomain("jellyfin.org");
 
 #ifdef Q_OS_WIN32
-  QVariant useOpengl = SettingsComponent::readPreinitValue(SETTINGS_SECTION_MAIN, "useOpenGL");
+  // 1) Share GL contexts to keep WebEngine + QML compositor in sync
+  QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
 
-  // Warning: this must be the same as the default value as declared in
-  // the settings_description.json file, or confusion will result.
+  // 2) Respect user setting, default to ANGLE (OpenGLES) for D3D11 stability
+  QVariant useOpengl = SettingsComponent::readPreinitValue(SETTINGS_SECTION_MAIN, "useOpenGL");
   if (useOpengl.type() != QMetaType::Bool)
     useOpengl = false;
 
@@ -55,6 +60,22 @@ static void preinitQt()
     QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
   else
     QCoreApplication::setAttribute(Qt::AA_UseOpenGLES);
+
+  // 3) Lock a compatible default surface format (GLES 3.0, double-buffer, vsync)
+  QSurfaceFormat fmt;
+  fmt.setRenderableType(QSurfaceFormat::OpenGLES);
+  fmt.setVersion(3, 0);
+  fmt.setProfile(QSurfaceFormat::NoProfile);
+  fmt.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
+  fmt.setSwapInterval(1);
+  QSurfaceFormat::setDefaultFormat(fmt);
+
+  // 4) Hint ANGLE/Chromium to use D3D11 and keep GPU features on
+  qputenv("QT_ANGLE_PLATFORM", "d3d11");
+  qputenv("QTWEBENGINE_CHROMIUM_FLAGS",
+          "--use-angle=d3d11 --use-gl=angle --enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist");
+  // If you still encounter rare timing issues, uncomment the next line (still GPU, non-threaded scenegraph):
+  // qputenv("QSG_RENDER_LOOP", "basic");
 #endif
 }
 
@@ -66,7 +87,7 @@ char** appendCommandLineArguments(int argc, char **argv, const QStringList& args
   memcpy(newArgv, argv, (size_t)(argc * sizeof(char*)));
 
   int pos = argc;
-  for(const QString& str : args)
+  for (const QString& str : args)
     newArgv[pos++] = qstrdup(str.toUtf8().data());
 
   return newArgv;
@@ -103,12 +124,12 @@ int main(int argc, char *argv[])
                        {"disable-gpu",             "Disable QtWebEngine gpu accel"},
                        {"force-external-webclient","Use webclient provided by server"}});
 
-    auto scaleOption = QCommandLineOption("scale-factor", "Set to a integer or default auto which controls" \
-                                                          "the scale (DPI) of the desktop interface.");
+    auto scaleOption = QCommandLineOption("scale-factor",
+        "Set to an integer or 'auto' to control the scale (DPI) of the desktop interface.");
     scaleOption.setValueName("scale");
     scaleOption.setDefaultValue("auto");
 
-    auto platformOption = QCommandLineOption("platform", "Equivalant to QT_QPA_PLATFORM.");
+    auto platformOption = QCommandLineOption("platform", "Equivalent to QT_QPA_PLATFORM.");
     platformOption.setValueName("platform");
     platformOption.setDefaultValue("default");
 
@@ -130,13 +151,13 @@ int main(int argc, char *argv[])
     char **newArgv = appendCommandLineArguments(argc, argv, g_qtFlags);
     int newArgc = argc + g_qtFlags.size();
 
-    // Qt calls setlocale(LC_ALL, "") in a bunch of places, which breaks
-    // float/string processing in mpv and ffmpeg.
 #ifdef Q_OS_UNIX
+    // Avoid locale side-effects in mpv/ffmpeg on *nix
     qputenv("LC_ALL", "C");
     qputenv("LC_NUMERIC", "C");
 #endif
 
+    // GPU path setup and attributes first
     preinitQt();
     detectOpenGLEarly();
 
@@ -144,17 +165,9 @@ int main(int argc, char *argv[])
     for (int i = 0; i < argc; i++)
       arguments << QString::fromLatin1(argv[i]);
 
+    // Parse CLI using a tiny QCoreApplication (scale flags need to be set before GUI)
     {
-      // This is kinda dumb. But in order for the QCommandLineParser
-      // to work properly we need to init if before we call process
-      // but we don't want to do that for the main application since
-      // we need to set the scale factor before we do that. So it becomes
-      // a small chicken-or-egg problem, which we "solve" by making
-      // this temporary console app.
-      //
       QCoreApplication core(newArgc, newArgv);
-
-      // Now parse the command line.
       parser.process(arguments);
     }
 
@@ -170,7 +183,6 @@ int main(int argc, char *argv[])
       fprintf(stderr, "Error: invalid log level '%s'. Valid levels: debug, info, warn, error, fatal\n", qPrintable(logLevel));
       return EXIT_FAILURE;
     }
-
     if (parser.isSet("log-level"))
       Log::SetLogLevel(logLevel);
 
@@ -184,50 +196,23 @@ int main(int argc, char *argv[])
 
     auto platform = parser.value("platform");
     if (!(platform.isEmpty() || platform == "default"))
-    {
       qputenv("QT_QPA_PLATFORM", platform.toUtf8());
+
+    // Optional runtime toggle for testing
+    if (parser.isSet("disable-gpu")) {
+      qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu-compositing --ignore-gpu-blocklist");
     }
 
-    auto configDir = parser.value("config-dir");
-    QString webEngineDataDir;
-    if (!configDir.isEmpty())
-    {
-      QFileInfo fi(configDir);
-      QString absPath = fi.absoluteFilePath();
-      QDir parentDir = fi.dir();
-
-      if (!parentDir.exists())
-      {
-        qFatal("Config directory parent does not exist: %s", qPrintable(parentDir.absolutePath()));
-      }
-
-      Paths::setConfigDir(absPath);
-      QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, absPath);
-      webEngineDataDir = absPath + "/QtWebEngine";
-    }
-    else
-    {
-      // Use Paths::dataDir() equivalent inline to avoid double nesting
-      QDir d(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation));
-      d.mkpath(d.absolutePath() + "/" + Names::MainName());
-      d.cd(Names::MainName());
-      webEngineDataDir = d.absolutePath() + "/QtWebEngine";
-    }
-
+    // Real GUI app
     QApplication app(newArgc, newArgv);
 
-#if defined(Q_OS_WIN) 
-    // Setting window icon on OSX will break user ability to change it
+#if defined(Q_OS_WIN)
     app.setWindowIcon(QIcon(":/images/icon.png"));
 #endif
-
 #if defined(Q_OS_LINUX) || defined(Q_OS_FREEBSD)
-  	// Set window icon on Linux using system icon theme
-  	app.setWindowIcon(QIcon::fromTheme("com.github.iwalton3.jellyfin-media-player", QIcon(":/images/icon.png")));
-    // Set app id for Wayland compositor window icon
+    app.setWindowIcon(QIcon::fromTheme("com.github.iwalton3.jellyfin-media-player", QIcon(":/images/icon.png")));
     app.setDesktopFileName("com.github.iwalton3.jellyfin-media-player");
 #endif
-
 #if defined(Q_OS_MAC) && defined(NDEBUG)
     PFMoveToApplicationsFolderIfNecessary();
 #endif
@@ -240,68 +225,71 @@ int main(int argc, char *argv[])
     }
 
     Log::RotateLog();
-
     qInfo() << "Config directory:" << qPrintable(Paths::dataDir());
 
-#ifdef Q_OS_UNIX
-    // install signals handlers for proper app closing.
+#if defined(Q_OS_UNIX)
     SignalManager signalManager(&app);
     Q_UNUSED(signalManager);
 #endif
 
     detectOpenGLLate();
-
     Codecs::preinitCodecs();
 
-    // Initialize all the components. This needs to be done
-    // early since most everything else relies on it
-    //
+    // Initialize core components early
     ComponentManager::Get().initialize();
-
     Log::ApplyConfigLogLevel();
-
     SettingsComponent::Get().setCommandLineValues(parser.optionNames());
 
+    // IMPORTANT: Initialize WebEngine EARLY (after QApplication, before any QML/engine/view)
     QtWebEngine::initialize();
 
     // Configure QtWebEngine paths
+    QString configDir = parser.value("config-dir");
+    QString webEngineDataDir;
+    if (!configDir.isEmpty()) {
+      QFileInfo fi(configDir);
+      QString absPath = fi.absoluteFilePath();
+      QDir parentDir = fi.dir();
+      if (!parentDir.exists())
+        qFatal("Config directory parent does not exist: %s", qPrintable(parentDir.absolutePath()));
+      Paths::setConfigDir(absPath);
+      QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, absPath);
+      webEngineDataDir = absPath + "/QtWebEngine";
+    } else {
+      QDir d(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation));
+      d.mkpath(d.absolutePath() + "/" + Names::MainName());
+      d.cd(Names::MainName());
+      webEngineDataDir = d.absolutePath() + "/QtWebEngine";
+    }
+
     QWebEngineProfile* defaultProfile = QWebEngineProfile::defaultProfile();
     defaultProfile->setCachePath(webEngineDataDir);
     defaultProfile->setPersistentStoragePath(webEngineDataDir);
 
-    // load QtWebChannel so that we can register our components with it.
+    // QML engine + UI bootstrap
     QQmlApplicationEngine *engine = Globals::Engine();
-
     KonvergoWindow::RegisterClass();
     Globals::SetContextProperty("components", &ComponentManager::Get().getQmlPropertyMap());
 
-    // the only way to detect if QML parsing fails is to hook to this signal and then see
-    // if we get a valid object passed to it. Any error messages will be reported on stderr
-    // but since no normal user should ever see this it should be fine
-    //
     QObject::connect(engine, &QQmlApplicationEngine::objectCreated, [=](QObject* object, const QUrl& url)
     {
       Q_UNUSED(url);
-
       if (object == nullptr)
         throw FatalException(QObject::tr("Failed to parse application engine script."));
 
       KonvergoWindow* window = Globals::MainWindow();
-
       QObject* webChannel = qvariant_cast<QObject*>(window->property("webChannel"));
       Q_ASSERT(webChannel);
       ComponentManager::Get().setWebChannel(qobject_cast<QWebChannel*>(webChannel));
-
       QObject::connect(uniqueApp, &UniqueApplication::otherApplicationStarted, window, &KonvergoWindow::otherAppFocus);
     });
+
     engine->load(QUrl(QStringLiteral("qrc:/ui/webview.qml")));
 
-    // run our application
     int ret = app.exec();
 
     delete uniqueApp;
     Globals::EngineDestroy();
-
     Codecs::Uninit();
     return ret;
   }
@@ -309,12 +297,9 @@ int main(int argc, char *argv[])
   {
     qFatal("Unhandled FatalException: %s", qPrintable(e.message()));
     QApplication errApp(argc, argv);
-
-    auto  msg = new ErrorMessage(e.message(), true);
+    auto msg = new ErrorMessage(e.message(), true);
     msg->show();
-
     errApp.exec();
-
     Codecs::Uninit();
     return 1;
   }
