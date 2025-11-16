@@ -6,7 +6,8 @@ on:
       - release
       - prerelease
       - test
-    workflow_dispatch:
+      - master
+  workflow_dispatch:
 jobs:
   build-win64:
     runs-on: windows-latest
