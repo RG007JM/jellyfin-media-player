@@ -17,13 +17,13 @@ jobs:
         arch: "win64_msvc2019_64"
         modules: "qtwebengine"
 
-    - name: Install dependencies (mpv, ninja, stage redist)
+    - name: Install dependencies (mpv, ninja, stage VC++ redist)
       shell: bash
       run: |
         set -e
         mkdir -p build
 
-        # VC++ Redistributable
+        # VC++ Redistributable (stage next to Bundle.wxs for WiX light -b)
         curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
         mkdir -p bundle/win
         cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
@@ -44,19 +44,24 @@ jobs:
         mv mpv.def libmpv.dll.a mpv/
         mv mpv build/
 
-    - name: Patch WiX Bundle.wxs redist path (PowerShell)
+    - name: Patch WiX Bundle.wxs redist path
       shell: pwsh
       run: |
-        $bundle   = "bundle/win/Bundle.wxs"
-        $content  = Get-Content -Raw $bundle -Encoding UTF8
-        # Replace any absolute VS 2019/2022 MSVC redist path with the local file
-        $pattern  = 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe'
-        $patched  = [regex]::Replace($content, $pattern, 'vcredist_x64.exe')
+        $bundle  = "bundle/win/Bundle.wxs"
+        $content = Get-Content -Raw $bundle -Encoding UTF8
+        $pattern = 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe'
+        $patched = [regex]::Replace($content, $pattern, 'vcredist_x64.exe')
         Set-Content -LiteralPath $bundle -Value $patched -Encoding UTF8
-        # Verify patch using SimpleMatch to avoid regex escaping/quoting pitfalls
         if (-not (Select-String -Path $bundle -SimpleMatch -Pattern "vcredist_x64.exe")) {
           throw "Bundle patch failed: vcredist_x64.exe not found in Bundle.wxs"
         }
+
+    - name: Install OpenSSL 1.1 runtime (for Qt 5.15 TLS)
+      shell: pwsh
+      run: |
+        choco install openssl11 -y --no-progress
+        $bin = "${env:ProgramFiles}\OpenSSL-Win64\bin"
+        if (-not (Test-Path "$bin\libssl-1_1-x64.dll")) { throw "OpenSSL 1.1 not found at $bin" }
 
     - name: Build
       shell: cmd
@@ -64,7 +69,7 @@ jobs:
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         cd build
 
-        rem Robust WiX bin detection (3.14 preferred, fallback to 3.11)
+        rem Robust WiX bin detection
         set WIXBIN=C:\Program Files (x86)\WiX Toolset v3.14\bin
         if not exist "%WIXBIN%\light.exe" set WIXBIN=C:\Program Files (x86)\WiX Toolset v3.11\bin
         set PATH=%PATH%;%WIXBIN%;%CD%
@@ -74,10 +79,17 @@ jobs:
         ninja
         ninja install
 
+        rem Locate Qt bin
         for %%I in ("%Qt5_DIR%\..\..") do set QTBIN=%%~fI\bin
+
+        rem Deploy Qt runtime + QML (QtQuick, WebEngine, WebChannel, Controls, etc.)
         %QTBIN%\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
 
-        rem Build MSI/EXE (light -b uses bundle/win so vcredist_x64.exe resolves)
+        rem Bundle OpenSSL 1.1 DLLs for QtNetwork TLS (fixes QSslSocket TLS init failures)
+        copy "%ProgramFiles%\OpenSSL-Win64\bin\libssl-1_1-x64.dll" output\ /Y
+        copy "%ProgramFiles%\OpenSSL-Win64\bin\libcrypto-1_1-x64.dll" output\ /Y
+
+        rem Package MSI + EXE; light -b uses bundle/win where vcredist_x64.exe lives
         ninja windows_package
 
     - name: Archive installer
