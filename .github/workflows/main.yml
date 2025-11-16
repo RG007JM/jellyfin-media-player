@@ -23,7 +23,7 @@ jobs:
         set -e
         mkdir -p build
 
-        # VC++ redist: download and stage alongside Bundle.wxs
+        # VC++ Redistributable
         curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
         mkdir -p bundle/win
         cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
@@ -47,11 +47,41 @@ jobs:
     - name: Patch WiX Bundle.wxs redist path (PowerShell)
       shell: pwsh
       run: |
-        $bundle = "bundle/win/Bundle.wxs"
-        $content = Get-Content -Raw $bundle
-        # Replace any VS 2019/2022 MSVC redist absolute path with local file name
-        $regex = 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe'
-        $new = $content -replace $regex, 'vcredist_x64.exe'
-        Set-Content -LiteralPath $bundle -Value $new -Encoding UTF8
-        # Show confirmation
-        Select-String -Path $bundle -Pattern 'vcredist_x64
+        $bundle   = "bundle/win/Bundle.wxs"
+        $content  = Get-Content -Raw $bundle -Encoding UTF8
+        # Replace any absolute VS 2019/2022 MSVC redist path with the local file
+        $pattern  = 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe'
+        $patched  = [regex]::Replace($content, $pattern, 'vcredist_x64.exe')
+        Set-Content -LiteralPath $bundle -Value $patched -Encoding UTF8
+        # Verify patch using SimpleMatch to avoid regex escaping/quoting pitfalls
+        if (-not (Select-String -Path $bundle -SimpleMatch -Pattern "vcredist_x64.exe")) {
+          throw "Bundle patch failed: vcredist_x64.exe not found in Bundle.wxs"
+        }
+
+    - name: Build
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        cd build
+
+        rem Robust WiX bin detection (3.14 preferred, fallback to 3.11)
+        set WIXBIN=C:\Program Files (x86)\WiX Toolset v3.14\bin
+        if not exist "%WIXBIN%\light.exe" set WIXBIN=C:\Program Files (x86)\WiX Toolset v3.11\bin
+        set PATH=%PATH%;%WIXBIN%;%CD%
+
+        cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=output -DCMAKE_MAKE_PROGRAM=ninja.exe -DQTROOT=%Qt5_DIR% -DMPV_INCLUDE_DIR=mpv/include -DMPV_LIBRARY=mpv/libmpv-2.dll -DCMAKE_INSTALL_PREFIX=output ..
+        lib /def:mpv\mpv.def /out:mpv\libmpv-2.dll.lib /MACHINE:X64
+        ninja
+        ninja install
+
+        for %%I in ("%Qt5_DIR%\..\..") do set QTBIN=%%~fI\bin
+        %QTBIN%\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
+
+        rem Build MSI/EXE (light -b uses bundle/win so vcredist_x64.exe resolves)
+        ninja windows_package
+
+    - name: Archive installer
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows
+        path: ${{ github.workspace }}/build/JellyfinMediaPlayer-*.exe
