@@ -6,6 +6,7 @@ on:
 jobs:
   build-win64:
     runs-on: windows-latest
+
     steps:
     - uses: actions/checkout@v4
 
@@ -17,14 +18,15 @@ jobs:
         modules: "qtwebengine"
 
     - name: Install dependencies
+      shell: bash
       run: |
         mkdir build
         curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe > vc_redist.x64.exe
-        sed -i 's#C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\VC\\Redist\\MSVC\\v142\\vcredist_x64.exe#'"$(readlink -f vc_redist.x64.exe | sed 's#/\([a-z]\)/#\1:\\#g' | tr '/' '\\' | sed 's/\\/\\\\/g')#g" bundle/win/Bundle.wxs
+        sed -i 's#C:\\\\Program Files (x86)\\\\Microsoft Visual Studio\\\\2019\\\\BuildTools\\\\VC\\\\Redist\\\\MSVC\\\\v142\\\\vcredist_x64.exe#'"$(readlink -f vc_redist.x64.exe | sed 's#/\([a-z]\)/#\1:\\#g' | tr '/' '\\' | sed 's/\\/\\\\/g')#g" bundle/win/Bundle.wxs
         curl -L https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip > ninja.zip
-        unzip ninja.zip
+        unzip -o ninja.zip
         mv ninja.exe build/
-        curl -L https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20251116-git-701201b.7z/download > mpv.7z
+        curl -L "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20251116-git-701201b.7z/download" > mpv.7z
         7z x mpv.7z
         mkdir mpv
         mv include mpv
@@ -33,9 +35,9 @@ jobs:
         mv libmpv-2.def mpv.def
         mv mpv.def libmpv.dll.a mpv/
         mv mpv build/
-      shell: bash
 
     - name: Build
+      shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         cd build
@@ -45,25 +47,12 @@ jobs:
         ninja
         ninja install
 
-        rem Find Qt bin properly from Qt5_DIR (which points to lib\cmake)
         for %%I in ("%Qt5_DIR%\..\..") do set QTBIN=%%~fI\bin
-
-        rem Deploy Qt runtime + QML modules used by Jellyfin
         %QTBIN%\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
 
-        rem Create Safe Mode launcher that forces software rendering and disables GPU compositing
-        echo @echo off> output\JellyfinMediaPlayer-SafeMode.cmd
-        echo set "QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu --disable-gpu-compositing --ignore-gpu-blocklist --disable-features=UseSkiaRenderer">> output\JellyfinMediaPlayer-SafeMode.cmd
-        echo set "QT_OPENGL=software">> output\JellyfinMediaPlayer-SafeMode.cmd
-        echo set "QSG_RENDER_LOOP=basic">> output\JellyfinMediaPlayer-SafeMode.cmd
-        echo set "QT_ANGLE_PLATFORM=warp">> output\JellyfinMediaPlayer-SafeMode.cmd
-        echo start "" "JellyfinMediaPlayer.exe">> output\JellyfinMediaPlayer-SafeMode.cmd
-
-        rem Package the installer
         ninja windows_package
-      shell: cmd
 
-    - name: Archive production artifacts
+    - name: Archive installer
       uses: actions/upload-artifact@v4
       with:
         name: windows
