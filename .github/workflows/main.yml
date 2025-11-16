@@ -63,59 +63,40 @@ jobs:
         path: build/openssl-cache
         key: openssl-1.1.1w-x64-dlls
     
-    - name: Provide OpenSSL 1.1 DLLs
+    - name: Cache OpenSSL 1.1.1zd build
+      uses: actions/cache@v4
+      with:
+        path: build/openssl-1.1.1zd-cache
+        key: openssl-1.1.1zd-msvc19
+
+    - name: Build OpenSSL 1.1.1zd (MSVC) if not cached
+      shell: cmd
+      run: |
+        if exist build\openssl-1.1.1zd-cache\libssl-1_1-x64.dll if exist build\openssl-1.1.1zd-cache\libcrypto-1_1-x64.dll goto done
+    
+        curl -L https://github.com/kzalewski/openssl-1.1.1/archive/refs/tags/1.1.1zd.zip -o openssl.zip
+        7z x -y -obuild\openssl-src openssl.zip
+        for /d %%D in (build\openssl-src\openssl-1.1.1-1.1.1zd*) do set OSSL=%%D
+    
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        cd %OSSL%
+        perl Configure VC-WIN64A shared no-makedepend
+        nmake
+        nmake install_sw INSTALLTOP=%GITHUB_WORKSPACE%\build\openssl-1.1.1zd-out
+    
+        mkdir %GITHUB_WORKSPACE%\build\openssl-1.1.1zd-cache
+        copy %GITHUB_WORKSPACE%\build\openssl-1.1.1zd-out\bin\libssl-1_1-x64.dll   %GITHUB_WORKSPACE%\build\openssl-1.1.1zd-cache\ /Y
+        copy %GITHUB_WORKSPACE%\build\openssl-1.1.1zd-out\bin\libcrypto-1_1-x64.dll %GITHUB_WORKSPACE%\build\openssl-1.1.1zd-cache\ /Y
+    
+        :done
+    
+    - name: Stage OpenSSL DLLs for app
       shell: pwsh
       run: |
-        $cache = "$env:GITHUB_WORKSPACE\build\openssl-cache"
-        $out   = "$env:GITHUB_WORKSPACE\build\output"
-        New-Item -ItemType Directory -Force -Path $cache,$out | Out-Null
-    
-        $ssl = Join-Path $cache "libssl-1_1-x64.dll"
-        $cry = Join-Path $cache "libcrypto-1_1-x64.dll"
-    
-        if ((Test-Path -LiteralPath $ssl) -and (Test-Path -LiteralPath $cry)) {
-          Copy-Item -LiteralPath $ssl -Destination $out -Force
-          Copy-Item -LiteralPath $cry -Destination $out -Force
-          exit 0
-        }
-    
-        # Download + extract OpenSSL installer, then cache the DLLs
-        $vers = @("w","v","u")
-        $jobs = @()
-        foreach ($v in $vers) {
-          $url = "https://slproweb.com/download/Win64OpenSSL-1_1_1$($v).exe"
-          $dst = "$env:RUNNER_TEMP\Win64OpenSSL-1_1_1$($v).exe"
-          $jobs += Start-Job -ScriptBlock {
-            param($u,$d)
-            try {
-              Invoke-WebRequest -Uri $u -OutFile $d -UseBasicParsing -TimeoutSec 300 -MaximumRedirection 5
-              if (Test-Path -LiteralPath $d) { return $d } else { return $null }
-            } catch { return $null }
-          } -ArgumentList $url,$dst
-        }
-    
-        $done = Wait-Job -Job $jobs -Any -Timeout 360
-        if (-not $done) { throw "Timed out downloading OpenSSL installer from mirrors" }
-        $path = Receive-Job $done | Select-Object -Last 1
-        $jobs | Remove-Job -Force
-    
-        if (-not $path -or -not (Test-Path -LiteralPath $path)) { throw "Failed to download any OpenSSL 1.1.1 installer" }
-    
-        $dir = "$env:RUNNER_TEMP\openssl111"
-        if (Test-Path -LiteralPath $dir) { Remove-Item -Recurse -Force $dir }
-        New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        & 7z x -y -o"$dir" "$path" | Out-Null
-    
-        $sslFound = Get-ChildItem -Path $dir -Recurse -Filter "libssl-1_1-x64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
-        $cryFound = Get-ChildItem -Path $dir -Recurse -Filter "libcrypto-1_1-x64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $sslFound -or -not $cryFound) { throw "Could not locate OpenSSL 1.1 DLLs inside installer" }
-    
-        Copy-Item -LiteralPath $sslFound.FullName -Destination $cache -Force
-        Copy-Item -LiteralPath $cryFound.FullName -Destination $cache -Force
-        Copy-Item -LiteralPath $sslFound.FullName -Destination $out   -Force
-        Copy-Item -LiteralPath $cryFound.FullName -Destination $out   -Force
-    
-        if ((Test-Path -LiteralPath (Join-Path $out "libssl-1_1-x64.dll")) -and (Test-Path -LiteralPath (Join-Path $out "libcrypto-1_1-x64.dll"))) { exit 0 } else { throw "OpenSSL DLLs missing in output" }
+        $out = "$env:GITHUB_WORKSPACE\build\output"
+        New-Item -ItemType Directory -Force -Path $out | Out-Null
+        Copy-Item "$env:GITHUB_WORKSPACE\build\openssl-1.1.1zd-cache\libssl-1_1-x64.dll"    $out -Force
+        Copy-Item "$env:GITHUB_WORKSPACE\build\openssl-1.1.1zd-cache\libcrypto-1_1-x64.dll" $out -Force
 
     - name: Build
       shell: cmd
