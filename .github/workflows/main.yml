@@ -72,13 +72,14 @@ jobs:
     
         $ssl = Join-Path $cache "libssl-1_1-x64.dll"
         $cry = Join-Path $cache "libcrypto-1_1-x64.dll"
-        if (Test-Path $ssl -and Test-Path $cry) {
-          Copy-Item $ssl $out -Force
-          Copy-Item $cry $out -Force
+    
+        if ((Test-Path -LiteralPath $ssl) -and (Test-Path -LiteralPath $cry)) {
+          Copy-Item -LiteralPath $ssl -Destination $out -Force
+          Copy-Item -LiteralPath $cry -Destination $out -Force
           exit 0
         }
     
-        # Parallel mirrored downloads of the installer; first success wins
+        # Download + extract OpenSSL installer, then cache the DLLs
         $vers = @("w","v","u")
         $jobs = @()
         foreach ($v in $vers) {
@@ -88,7 +89,7 @@ jobs:
             param($u,$d)
             try {
               Invoke-WebRequest -Uri $u -OutFile $d -UseBasicParsing -TimeoutSec 300 -MaximumRedirection 5
-              if (Test-Path $d) { return $d } else { return $null }
+              if (Test-Path -LiteralPath $d) { return $d } else { return $null }
             } catch { return $null }
           } -ArgumentList $url,$dst
         }
@@ -98,11 +99,10 @@ jobs:
         $path = Receive-Job $done | Select-Object -Last 1
         $jobs | Remove-Job -Force
     
-        if (-not $path -or -not (Test-Path $path)) { throw "Failed to download any OpenSSL 1.1.1 installer" }
+        if (-not $path -or -not (Test-Path -LiteralPath $path)) { throw "Failed to download any OpenSSL 1.1.1 installer" }
     
-        # Extract DLLs from installer with 7z (already on runner)
         $dir = "$env:RUNNER_TEMP\openssl111"
-        if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+        if (Test-Path -LiteralPath $dir) { Remove-Item -Recurse -Force $dir }
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         & 7z x -y -o"$dir" "$path" | Out-Null
     
@@ -110,14 +110,12 @@ jobs:
         $cryFound = Get-ChildItem -Path $dir -Recurse -Filter "libcrypto-1_1-x64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $sslFound -or -not $cryFound) { throw "Could not locate OpenSSL 1.1 DLLs inside installer" }
     
-        Copy-Item $sslFound.FullName $cache -Force
-        Copy-Item $cryFound.FullName $cache -Force
-        Copy-Item $sslFound.FullName $out   -Force
-        Copy-Item $cryFound.FullName $out   -Force
+        Copy-Item -LiteralPath $sslFound.FullName -Destination $cache -Force
+        Copy-Item -LiteralPath $cryFound.FullName -Destination $cache -Force
+        Copy-Item -LiteralPath $sslFound.FullName -Destination $out   -Force
+        Copy-Item -LiteralPath $cryFound.FullName -Destination $out   -Force
     
-        # Sanity check
-        if (-not (Test-Path "$out\libssl-1_1-x64.dll"))    { throw "Missing libssl-1_1-x64.dll" }
-        if (-not (Test-Path "$out\libcrypto-1_1-x64.dll")) { throw "Missing libcrypto-1_1-x64.dll" }
+        if ((Test-Path -LiteralPath (Join-Path $out "libssl-1_1-x64.dll")) -and (Test-Path -LiteralPath (Join-Path $out "libcrypto-1_1-x64.dll"))) { exit 0 } else { throw "OpenSSL DLLs missing in output" }
 
     - name: Build
       shell: cmd
