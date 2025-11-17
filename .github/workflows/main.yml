@@ -55,13 +55,6 @@ jobs:
         if (-not (Select-String -Path $bundle -SimpleMatch -Pattern "vcredist_x64.exe")) {
           throw "Bundle patch failed: vcredist_x64.exe not found in Bundle.wxs"
         }
-
-   # Fast & reliable OpenSSL 1.1.1w provisioning with cache + mirrored fallbacks
-    - name: Cache OpenSSL 1.1.1w DLLs
-      uses: actions/cache@v4
-      with:
-        path: build/openssl-cache
-        key: openssl-1.1.1w-x64-dlls
     
     - name: Cache OpenSSL 1.1.1zd build
       uses: actions/cache@v4
