@@ -32,15 +32,12 @@ jobs:
         mkdir dep-install\lib
         mkdir dep-install\bin
         
-        rem Download Ninja
         curl -L https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip -o ninja.zip
         tar -xf ninja.zip -C dep-install\bin
         del ninja.zip
         
-        rem Add dep-install\bin to PATH
         echo %GITHUB_WORKSPACE%\dep-install\bin>> %GITHUB_PATH%
         
-        rem Install Reuse Tool
         pip install reuse
 
     - name: Install Vulkan SDK
@@ -49,10 +46,7 @@ jobs:
         $url = "https://sdk.lunarg.com/sdk/download/1.3.296.0/windows/VulkanSDK-1.3.296.0-Installer.exe"
         $out = "VulkanSDK.exe"
         
-        Write-Host "Downloading Vulkan SDK..."
         Invoke-WebRequest -Uri $url -OutFile $out -UserAgent "curl/7.88.1"
-        
-        Write-Host "Installing Vulkan SDK..."
         Start-Process -FilePath .\$out -ArgumentList "--root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install" -Wait
         
         if (Test-Path "C:\VulkanSDK\Bin") {
@@ -64,7 +58,6 @@ jobs:
         echo "VULKAN_SDK=$sdkRoot" >> $env:GITHUB_ENV
         echo "VK_SDK_PATH=$sdkRoot" >> $env:GITHUB_ENV
         echo "$sdkRoot\Bin" >> $env:GITHUB_PATH
-        echo "$sdkRoot\Include" >> $env:GITHUB_PATH
         Remove-Item $out
 
     - name: Prepare Libmpv
@@ -72,20 +65,11 @@ jobs:
       run: |
         $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20251214-git-f7be2ee.7z"
         Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
-        
-        if ((Get-Item "mpv.7z").Length -lt 1000000) { throw "Download failed" }
-        
         7z x mpv.7z -ompv
         Set-Location mpv
         
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /exports libmpv-2.dll > exports.txt"
-        $defContent = @("LIBRARY libmpv-2.dll", "EXPORTS")
-        $lines = Get-Content exports.txt
-        foreach ($line in $lines) {
-            if ($line -match "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)") {
-                $defContent += $matches[1]
-            }
-        }
+        $defContent = @("LIBRARY libmpv-2.dll", "EXPORTS") + (Get-Content exports.txt | ForEach-Object { if ($_ -match "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)") { $matches[1] } })
         $defContent | Set-Content libmpv-2.def
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
         
@@ -99,14 +83,13 @@ jobs:
         $url = "https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip"
         Invoke-WebRequest -Uri $url -OutFile "sdl2.zip"
         Expand-Archive -Path "sdl2.zip" -DestinationPath "sdl2-temp" -Force
-        $root = Get-ChildItem "sdl2-temp" | Select-Object -First 1
+        $root = (Get-ChildItem "sdl2-temp" | Select-Object -First 1).FullName
         
-        Copy-Item -Recurse -Force "$($root.FullName)\include\*" "dep-install\include\"
-        Copy-Item -Force "$($root.FullName)\lib\x64\SDL2.lib" "dep-install\lib\"
-        Copy-Item -Force "$($root.FullName)\lib\x64\SDL2main.lib" "dep-install\lib\"
-        Copy-Item -Force "$($root.FullName)\lib\x64\SDL2.dll" "dep-install\bin\"
-        Remove-Item -Recurse -Force "sdl2-temp"
-        Remove-Item "sdl2.zip"
+        Copy-Item -Recurse -Force "$root\include\*" "dep-install\include\"
+        Copy-Item -Force "$root\lib\x64\SDL2.lib" "dep-install\lib\"
+        Copy-Item -Force "$root\lib\x64\SDL2main.lib" "dep-install\lib\"
+        Copy-Item -Force "$root\lib\x64\SDL2.dll" "dep-install\bin\"
+        Remove-Item -Recurse -Force "sdl2-temp", "sdl2.zip"
 
     - name: Prepare ECM and MpvQt
       shell: cmd
@@ -117,192 +100,81 @@ jobs:
         
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
-        cmake -B build -GNinja -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
-        if %errorlevel% neq 0 exit /b %errorlevel%
+        cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
         ninja -C build install
-        if %errorlevel% neq 0 exit /b %errorlevel%
         cd ..
         
         git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
         cd mpvqt
-        
-        powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
-        echo. >> src\mpvcontroller.cpp
-        echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
-        
-        cmake -B build -GNinja ^
-          -DCMAKE_C_COMPILER=cl ^
-          -DCMAKE_CXX_COMPILER=cl ^
-          -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" ^
-          -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" ^
-          -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" ^
-          -DCMAKE_CXX_FLAGS="-I%INSTALL_DIR_FWD%/include -EHsc"
-        if %errorlevel% neq 0 exit /b %errorlevel%
+        cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake"
         ninja -C build install
-        if %errorlevel% neq 0 exit /b %errorlevel%
         cd ..
 
-    - name: Download & Stage VC++ Redist and OpenSSL 3
+    - name: Download & Stage VC++ Redist and OpenSSL
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Force -Path bundle/win
-        
-        $vcUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-        Invoke-WebRequest -Uri $vcUrl -OutFile "vc_redist.x64.exe" -UserAgent "curl/7.88.1"
-        Copy-Item "vc_redist.x64.exe" "bundle/win/vcredist_x64.exe"
+        Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "bundle/win/vcredist_x64.exe" -UserAgent "curl/7.88.1"
         
         $sslUrl = "https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-3.6.0.zip"
-        $zipPath = "openssl.zip"
-        Invoke-WebRequest -Uri $sslUrl -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        Expand-Archive -Path $zipPath -DestinationPath "openssl-temp" -Force
-        
-        $binPath = Get-ChildItem -Path "openssl-temp" -Recurse -Filter "libssl-3-x64.dll" | Select-Object -First 1 | Split-Path -Parent
+        Invoke-WebRequest -Uri $sslUrl -OutFile "openssl.zip" -UserAgent "Mozilla/5.0"
+        Expand-Archive -Path "openssl.zip" -DestinationPath "openssl-temp" -Force
+        $binPath = (Get-ChildItem -Path "openssl-temp" -Recurse -Filter "libssl-3-x64.dll" | Select-Object -First 1).DirectoryName
         Copy-Item "$binPath\libssl-3-x64.dll" "dep-install\bin\"
         Copy-Item "$binPath\libcrypto-3-x64.dll" "dep-install\bin\"
-        Remove-Item -Recurse -Force "openssl-temp"
-        Remove-Item -Force $zipPath
-
-    - name: Patch WiX Bundle.wxs
-      shell: pwsh
-      run: |
-        $bundle  = "bundle/win/Bundle.wxs"
-        if (Test-Path $bundle) {
-            $c = Get-Content -Raw $bundle -Encoding UTF8
-            $c = $c -replace 'Source=".*vcredist_x64.exe"', 'Source="bundle\win\vcredist_x64.exe"'
-            $c = [regex]::Replace($c, 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe', 'vcredist_x64.exe')
-            Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
-        }
+        Remove-Item -Recurse -Force "openssl-temp", "openssl.zip"
 
     - name: Build Jellyfin Desktop
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
-        
-        rem --- PATCH 1: Remove MprisComponent (Fixes QtDBus Error) ---
-        powershell -Command "$f='src/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'mpris/MprisComponent' -and $_ -notmatch 'add_subdirectory.mpris.' -and $_ -notmatch 'Qt6::DBus' } | Set-Content $f"
-        powershell -Command "$f='src/core/ComponentManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'MprisComponent' } | Set-Content $f"
-        if exist src\mpris rmdir /s /q src\mpris
-        
-        rem --- PATCH 2: Disable TaskbarComponent (Fixes QWinTaskbarButton Error) ---
-        powershell -Command "$f='src/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'taskbar' -and $_ -notmatch 'TaskbarComponent' } | Set-Content $f"
-        powershell -Command "$f='src/core/ComponentManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' } | Set-Content $f"
-        powershell -Command "$f='src/ui/WindowManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'm_taskbar' } | Set-Content $f"
-        if exist src\taskbar rmdir /s /q src\taskbar
-        
-        rem --- PATCH 3: Disable Tests for Removed Components ---
-        powershell -Command "if (Test-Path tests/CMakeLists.txt) { $f='tests/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'MprisComponent' } | Set-Content $f }"
-        
-        rem --- PATCH 4: Add windows.h to CodecsComponent.cpp ---
-        powershell -Command "$f='src/player/CodecsComponent.cpp'; $c=Get-Content $f -Raw; $c='#include <windows.h>' + [Environment]::NewLine + $c; Set-Content $f $c"
-
         cd build
         
-        set "DEP_INSTALL=%GITHUB_WORKSPACE%\dep-install"
         set "DEP_INSTALL_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
         
-        for /f "delims=" %%i in ('dir /s /b "%DEP_INSTALL%\MpvQtConfig.cmake"') do set MPVQT_CONFIG_PATH=%%~dpi
-        if defined MPVQT_CONFIG_PATH set MPVQT_DIR=%MPVQT_CONFIG_PATH%
-        
-        for /f "delims=" %%i in ('dir /s /b "%DEP_INSTALL%\ECMConfig.cmake"') do set ECM_CONFIG_PATH=%%~dpi
-        if defined ECM_CONFIG_PATH set ECM_DIR=%ECM_CONFIG_PATH%
-        
         cmake -GNinja ^
-          -DCMAKE_C_COMPILER=cl ^
-          -DCMAKE_CXX_COMPILER=cl ^
           -DCMAKE_BUILD_TYPE=Release ^
           -DCMAKE_INSTALL_PREFIX=output ^
           -DCMAKE_PREFIX_PATH="%DEP_INSTALL_FWD%;%Qt6_DIR%" ^
-          -DMpvQt_DIR="%MPVQT_DIR%" ^
-          -DECM_DIR="%ECM_DIR%" ^
-          -DQTROOT="%Qt6_DIR%" ^
-          -DMPV_INCLUDE_DIR="%DEP_INSTALL_FWD%/include" ^
-          -DMPV_LIBRARY="%DEP_INSTALL_FWD%/lib/libmpv.lib" ^
-          -DSDL2_INCLUDE_DIR="%DEP_INSTALL_FWD%/include" ^
-          -DSDL2_LIBRARY="%DEP_INSTALL_FWD%/lib/SDL2.lib" ^
           ..
         
         ninja
-        
-        echo Running Tests...
-        set QT_QPA_PLATFORM=offscreen
-        ctest -V
-        
         ninja install
-        
-        echo Deploying Qt...
 
-    - name: Deploy Qt and Copy Dependencies
+    - name: Deploy Qt and Finalize Dependencies
       shell: pwsh
       run: |
-        $target = "build\output\Jellyfin Desktop.exe"
         $outDir = "build\output"
+        $target = "$outDir\Jellyfin Desktop.exe"
         
-        # 1. Run windeployqt
-        $deployTool = Get-Command "windeployqt" -ErrorAction SilentlyContinue
-        if ($deployTool) {
-             # Added --compiler-runtime to get VC DLLs, --no-opengl-sw
-             & $deployTool.Source --release --qmldir src\ui --compiler-runtime --no-opengl-sw --xml $target
-             $binDir = Split-Path -Parent $deployTool.Source
-        } else {
-             Write-Error "windeployqt.exe not found."
-        }
+        & "windeployqt" --release --qmldir src\ui --compiler-runtime --no-opengl-sw --xml $target
         
-        # 2. Force Copy Qt Modules
-        $qtDlls = @(
-            "Qt6Xml.dll", "Qt6Widgets.dll", "Qt6Gui.dll", "Qt6Core.dll", 
-            "Qt6Network.dll", "Qt6Concurrent.dll", "Qt6Quick.dll", "Qt6Qml.dll", 
-            "Qt6SerialPort.dll", "Qt6ShaderTools.dll", "Qt6OpenGL.dll",
-            "Qt6Multimedia.dll", "Qt6MultimediaQuick.dll", "Qt6MultimediaWidgets.dll",
-            "Qt6Core5Compat.dll", "Qt6Sql.dll", "Qt6PrintSupport.dll"
-        )
-        foreach ($dll in $qtDlls) {
-            $src = "$binDir\$dll"
-            if (Test-Path $src) { Copy-Item -Force $src $outDir }
-        }
+        # --- FIX: VC Runtime Renaming Logic ---
+        $vsRedistDir = (Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC" -Recurse -Filter "vcruntime140.dll" | Select-Object -First 1).DirectoryName
         
-        # 3. FIX: VC Runtime Renaming Logic
-        # Qt6Quick.dll depends on vcruntime140_1.dll (with underscore).
-        # We must ensure the file is named exactly that in the output.
-        
-        $vsRedistDir = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC" -Recurse -Filter "vcruntime140.dll" | Select-Object -First 1 | Split-Path -Parent
-        if (-not $vsRedistDir) { $vsRedistDir = "C:\Windows\System32" }
-        
-        # Map of DesiredName -> PossibleSourceNames
-        # If source has no underscore, we copy it to the name WITH underscore.
         $runtimeMap = @{
-            "vcruntime140.dll"   = @("vcruntime140.dll");
-            "vcruntime140_1.dll" = @("vcruntime140_1.dll", "vcruntime1401.dll");
-            "msvcp140.dll"       = @("msvcp140.dll");
-            "msvcp140_1.dll"     = @("msvcp140_1.dll", "msvcp1401.dll");
-            "msvcp140_2.dll"     = @("msvcp140_2.dll", "msvcp1402.dll")
+            "vcruntime140_1.dll" = "vcruntime1401.dll";
+            "msvcp140_1.dll"     = "msvcp1401.dll";
+            "msvcp140_2.dll"     = "msvcp1402.dll"
         }
         
-        foreach ($key in $runtimeMap.Keys) {
-            $found = $false
-            foreach ($candidate in $runtimeMap[$key]) {
-                $srcPath = "$vsRedistDir\$candidate"
-                if (Test-Path $srcPath) {
-                    Copy-Item -Force $srcPath "$outDir\$key"
-                    Write-Host "Resolved $key from $candidate"
-                    $found = $true
-                    break
-                }
+        foreach ($correctName in $runtimeMap.Keys) {
+            $wrongName = $runtimeMap[$correctName]
+            $srcPath = "$vsRedistDir\$wrongName"
+            if (Test-Path $srcPath) {
+                Copy-Item -Force $srcPath "$outDir\$correctName"
+                Write-Host "FIX: Copied $wrongName as $correctName"
             }
-            if (-not $found) { Write-Warning "Could not find runtime for $key" }
         }
         
-        # 4. Copy External Libs
-        $depDlls = @("libssl-3-x64.dll", "libcrypto-3-x64.dll", "libmpv-2.dll", "SDL2.dll", "MpvQt.dll")
-        foreach ($dll in $depDlls) {
-            $src = "dep-install\bin\$dll"
-            if (Test-Path $src) { Copy-Item -Force $src $outDir }
+        # --- Copy Other Dependencies ---
+        "libssl-3-x64.dll", "libcrypto-3-x64.dll", "libmpv-2.dll", "SDL2.dll", "MpvQt.dll" | ForEach-Object {
+            Copy-Item -Force "dep-install\bin\$_" $outDir
         }
         
-        # CLEANUP & VERIFY
-        Get-ChildItem -Path $outDir -Filter "*.pdb" -Recurse | Remove-Item -Force
-        
-        Write-Host "`n--- FINAL DIRECTORY CONTENT (Proof for Installer) ---"
+        # --- Final Verification ---
+        Write-Host "--- Final DLLs in Output Directory ---"
         Get-ChildItem -Path $outDir -Filter *.dll | Select-Object Name
 
     - name: Build Installer Package
