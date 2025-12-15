@@ -100,17 +100,54 @@ jobs:
         cd ..
 
     - name: Download & Stage VC++ Redist and OpenSSL 3
-      shell: bash
+      shell: pwsh
       run: |
-        mkdir -p bundle/win
-        curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
-        cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
+        New-Item -ItemType Directory -Force -Path bundle/win
         
-        curl -L https://mirror.firedaemon.com/openssl/openssl-3.3.0-dev-1-ga91d575-windows-x64.zip -o openssl.zip
-        unzip -o openssl.zip -d openssl-temp
-        cp openssl-temp/x64/bin/libssl-3-x64.dll dep-install/bin/
-        cp openssl-temp/x64/bin/libcrypto-3-x64.dll dep-install/bin/
-        rm -rf openssl-temp openssl.zip
+        # VC++ Redist
+        $vcUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+        Write-Host "Downloading VC++ Redist..."
+        Invoke-WebRequest -Uri $vcUrl -OutFile "vc_redist.x64.exe" -UserAgent "curl/7.88.1"
+        Copy-Item "vc_redist.x64.exe" "bundle/win/vcredist_x64.exe"
+        
+        # OpenSSL 3.3.0 (Win64) - FireDaemon Mirror
+        # Using a browser-like UserAgent to avoid 403/HTML responses
+        $sslUrl = "https://mirror.firedaemon.com/openssl/openssl-3.3.0-dev-1-ga91d575-windows-x64.zip"
+        $zipPath = "openssl.zip"
+        
+        Write-Host "Downloading OpenSSL from $sslUrl..."
+        try {
+            Invoke-WebRequest -Uri $sslUrl -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -MaximumRedirection 5
+        } catch {
+            Write-Error "Download failed: $_"
+            exit 1
+        }
+        
+        # Verify file size (should be > 10MB)
+        if ((Get-Item $zipPath).Length -lt 10000000) { 
+            Write-Error "OpenSSL zip is too small. Likely blocked/corrupted." 
+            exit 1 
+        }
+        
+        Write-Host "Extracting OpenSSL..."
+        Expand-Archive -Path $zipPath -DestinationPath "openssl-temp" -Force
+        
+        # Locate the bin folder (structure might vary)
+        $binPath = Get-ChildItem -Path "openssl-temp" -Recurse -Directory -Filter "bin" | Select-Object -First 1 -ExpandProperty FullName
+        
+        if (-not $binPath) {
+            Write-Error "Could not find 'bin' folder in extracted OpenSSL zip"
+            Get-ChildItem -Path "openssl-temp" -Recurse | Select-Object FullName
+            exit 1
+        }
+        
+        Write-Host "Found bin path: $binPath"
+        Copy-Item "$binPath\libssl-3-x64.dll" "dep-install\bin\"
+        Copy-Item "$binPath\libcrypto-3-x64.dll" "dep-install\bin\"
+        
+        Remove-Item -Recurse -Force "openssl-temp"
+        Remove-Item -Force $zipPath
+
 
     - name: Patch WiX Bundle.wxs
       shell: pwsh
