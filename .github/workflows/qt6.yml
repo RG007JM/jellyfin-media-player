@@ -93,7 +93,7 @@ jobs:
         rem 1. Remove ANY existing destructor line
         powershell -Command "(Get-Content src/mpvcontroller.h) -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', '' | Set-Content src/mpvcontroller.h"
         
-        rem 2. Insert clean destructor declaration (SAFE METHOD using explicit string concatenation)
+        rem 2. Insert clean destructor declaration
         powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
         
         rem 3. Append definition to source file
@@ -183,6 +183,8 @@ jobs:
           -DMpvQt_DIR="%MPVQT_DIR%" ^
           -DECM_DIR="%ECM_DIR%" ^
           -DQTROOT="%Qt6_DIR%" ^
+          -DMPV_INCLUDE_DIR="%DEP_INSTALL_FWD%/include" ^
+          -DMPV_LIBRARY="%DEP_INSTALL_FWD%/lib/libmpv.lib" ^
           ..
         
         ninja
