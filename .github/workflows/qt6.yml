@@ -22,7 +22,7 @@ jobs:
         arch: "win64_msvc2022_64"
         modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning qtshadertools qt5compat qtimageformats"
 
-    - name: Setup Build Environment (Ninja, Dirs)
+    - name: Setup Build Environment (Ninja, Dirs, Reuse)
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
@@ -39,6 +39,9 @@ jobs:
         
         rem Add dep-install\bin to PATH
         echo %GITHUB_WORKSPACE%\dep-install\bin>> %GITHUB_PATH%
+        
+        rem Install Reuse Tool
+        pip install reuse
 
     - name: Install Vulkan SDK
       shell: pwsh
@@ -58,12 +61,53 @@ jobs:
             $sdkRoot = Get-ChildItem "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
         }
         
-        Write-Host "Vulkan SDK installed at: $sdkRoot"
         echo "VULKAN_SDK=$sdkRoot" >> $env:GITHUB_ENV
         echo "VK_SDK_PATH=$sdkRoot" >> $env:GITHUB_ENV
         echo "$sdkRoot\Bin" >> $env:GITHUB_PATH
         echo "$sdkRoot\Include" >> $env:GITHUB_PATH
         Remove-Item $out
+
+    - name: Build p8-platform (CEC Dependency)
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        set "INSTALL_DIR=%GITHUB_WORKSPACE%\dep-install"
+        
+        git clone https://github.com/Pulse-Eight/platform.git p8-platform
+        cd p8-platform
+        cmake -B build -GNinja ^
+          -DCMAKE_BUILD_TYPE=Release ^
+          -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
+        
+        ninja -C build install
+        cd ..
+
+    - name: Build LibCEC
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        set "INSTALL_DIR=%GITHUB_WORKSPACE%\dep-install"
+        set "INSTALL_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
+        
+        git clone https://github.com/Pulse-Eight/libcec.git libcec
+        cd libcec
+        
+        cmake -B build -GNinja ^
+          -DCMAKE_BUILD_TYPE=Release ^
+          -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" ^
+          -Dp8-platform_DIR="%INSTALL_DIR%\lib\p8-platform" ^
+          -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%"
+          
+        ninja -C build install
+        cd ..
+        
+        rem Verify install
+        if exist "%INSTALL_DIR%\lib\cec.lib" (
+            echo CEC build success.
+        ) else (
+            echo CEC build failed!
+            exit /b 1
+        )
 
     - name: Prepare Libmpv
       shell: pwsh
@@ -76,7 +120,6 @@ jobs:
         7z x mpv.7z -ompv
         Set-Location mpv
         
-        # Create .lib from .dll
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /exports libmpv-2.dll > exports.txt"
         $defContent = @("LIBRARY libmpv-2.dll", "EXPORTS")
         $lines = Get-Content exports.txt
@@ -88,7 +131,6 @@ jobs:
         $defContent | Set-Content libmpv-2.def
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
         
-        # Correctly stage headers and libs
         Copy-Item -Recurse -Force include\* ..\dep-install\include\
         Copy-Item libmpv.lib ..\dep-install\lib\
         Copy-Item libmpv-2.dll ..\dep-install\bin\
@@ -179,14 +221,14 @@ jobs:
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
         
-        rem --- PATCH 1: Remove MprisComponent from CMakeLists (Safe Read-Write) ---
+        rem --- PATCH 1: Remove MprisComponent (Fixes QtDBus Error) ---
         powershell -Command "$f='src/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'mpris/MprisComponent' -and $_ -notmatch 'add_subdirectory.mpris.' -and $_ -notmatch 'Qt6::DBus' } | Set-Content $f"
-        
-        rem --- PATCH 2: Remove MprisComponent from ComponentManager (Safe Read-Write) ---
         powershell -Command "$f='src/core/ComponentManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'MprisComponent' } | Set-Content $f"
-        
-        rem --- DELETE: Mpris Source Directory ---
         if exist src\mpris rmdir /s /q src\mpris
+        
+        rem --- PATCH 2: Disable TaskbarComponent (Fixes QWinTaskbarButton Error) ---
+        powershell -Command "$f='src/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' } | Set-Content $f"
+        powershell -Command "$f='src/core/ComponentManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' } | Set-Content $f"
         
         rem --- PATCH 3: Add windows.h to CodecsComponent.cpp ---
         powershell -Command "$f='src/player/CodecsComponent.cpp'; $c=Get-Content $f -Raw; $c='#include <windows.h>' + [Environment]::NewLine + $c; Set-Content $f $c"
@@ -215,6 +257,8 @@ jobs:
           -DMPV_LIBRARY="%DEP_INSTALL_FWD%/lib/libmpv.lib" ^
           -DSDL2_INCLUDE_DIR="%DEP_INSTALL_FWD%/include" ^
           -DSDL2_LIBRARY="%DEP_INSTALL_FWD%/lib/SDL2.lib" ^
+          -DCEC_INCLUDE_DIR="%DEP_INSTALL_FWD%/include" ^
+          -DCEC_LIBRARY="%DEP_INSTALL_FWD%/lib/cec.lib" ^
           ..
         
         ninja
@@ -227,6 +271,7 @@ jobs:
         copy "%DEP_INSTALL%\bin\libcrypto-3-x64.dll" output\
         copy "%DEP_INSTALL%\bin\libmpv-2.dll" output\
         copy "%DEP_INSTALL%\bin\SDL2.dll" output\
+        copy "%DEP_INSTALL%\bin\cec.dll" output\
         
         ninja windows_package
 
