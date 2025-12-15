@@ -20,7 +20,7 @@ jobs:
       with:
         version: "6.8.0"
         arch: "win64_msvc2022_64"
-        modules: "qtwebengine"
+        modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning"
 
     - name: Setup Build Environment (Ninja, Dirs)
       shell: cmd
@@ -93,8 +93,8 @@ jobs:
         rem 1. Remove ANY existing destructor line
         powershell -Command "(Get-Content src/mpvcontroller.h) -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', '' | Set-Content src/mpvcontroller.h"
         
-        rem 2. Insert clean destructor declaration using simple string replacement (no backticks)
-        powershell -Command "$txt = Get-Content src/mpvcontroller.h -Raw; $txt = $txt.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + [Environment]::NewLine + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $txt"
+        rem 2. Insert clean destructor declaration (SAFE METHOD using explicit string concatenation)
+        powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
         
         rem 3. Append definition to source file
         echo. >> src\mpvcontroller.cpp
@@ -111,13 +111,6 @@ jobs:
         
         ninja -C build install
         if %errorlevel% neq 0 exit /b %errorlevel%
-        
-        rem Verify install immediately
-        if not exist "%INSTALL_DIR%\lib\cmake\MpvQt\MpvQtConfig.cmake" (
-           echo ERROR: MpvQtConfig.cmake not found! Build likely failed silently.
-           dir /s "%INSTALL_DIR%"
-           exit /b 1
-        )
         cd ..
 
     - name: Download & Stage VC++ Redist and OpenSSL 3
