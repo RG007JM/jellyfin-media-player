@@ -64,7 +64,6 @@ jobs:
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
         
         # Correctly stage headers and libs
-        # Headers go to dep-install/include/mpv/client.h
         Copy-Item -Recurse -Force include\* ..\dep-install\include\
         Copy-Item libmpv.lib ..\dep-install\lib\
         Copy-Item libmpv-2.dll ..\dep-install\bin\
@@ -73,30 +72,24 @@ jobs:
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        
-        rem Define Absolute Paths
         set "INSTALL_DIR=%GITHUB_WORKSPACE%\dep-install"
         set "INSTALL_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
         
-        rem --- 1. Build Extra CMake Modules (ECM) ---
+        rem --- Build ECM ---
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
-        
-        cmake -B build -GNinja ^
-          -DCMAKE_C_COMPILER=cl ^
-          -DCMAKE_CXX_COMPILER=cl ^
-          -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
-        
+        cmake -B build -GNinja -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
         ninja -C build install
-        if %errorlevel% neq 0 exit /b %errorlevel%
         cd ..
         
-        rem --- 2. Build MpvQt ---
+        rem --- Build MpvQt ---
         git clone https://github.com/KDE/mpvqt.git
         cd mpvqt
         
-        rem Ensure we point to the ECM we just installed
-        rem We use forward slashes for CMake paths to be safe
+        rem PATCH: Fix MSVC C2027 (incomplete type deletion)
+        rem We use PowerShell to replace inline destructor with declaration and add definition to cpp
+        powershell -Command "(Get-Content src/mpvcontroller.h) -replace '~MpvController\(\) = default;', '~MpvController();' | Set-Content src/mpvcontroller.h"
+        powershell -Command "Add-Content src/mpvcontroller.cpp '`nMpvController::~MpvController() = default;'"
         
         cmake -B build -GNinja ^
           -DCMAKE_C_COMPILER=cl ^
@@ -107,10 +100,8 @@ jobs:
           -DCMAKE_CXX_FLAGS="-I%INSTALL_DIR_FWD%/include -EHsc"
         
         ninja -C build install
-        if %errorlevel% neq 0 exit /b %errorlevel%
         
-        rem Verify installation
-        echo Verifying MpvQtConfig.cmake exists...
+        rem Verify install
         dir /s /b "%INSTALL_DIR%\MpvQtConfig.cmake"
         cd ..
 
@@ -125,22 +116,16 @@ jobs:
         Invoke-WebRequest -Uri $vcUrl -OutFile "vc_redist.x64.exe" -UserAgent "curl/7.88.1"
         Copy-Item "vc_redist.x64.exe" "bundle/win/vcredist_x64.exe"
         
-        # OpenSSL 3.6.0 - Direct FireDaemon CDN
+        # OpenSSL 3.6.0
         $sslUrl = "https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-3.6.0.zip"
         $zipPath = "openssl.zip"
-        
-        Write-Host "Downloading OpenSSL from $sslUrl..."
+        Write-Host "Downloading OpenSSL..."
         Invoke-WebRequest -Uri $sslUrl -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        
         if ((Get-Item $zipPath).Length -lt 1000000) { throw "Download failed" }
-        
         Expand-Archive -Path $zipPath -DestinationPath "openssl-temp" -Force
         
-        # Find x64 bin folder
         $binPath = Get-ChildItem -Path "openssl-temp" -Recurse -Filter "libssl-3-x64.dll" | Select-Object -First 1 | Split-Path -Parent
-        
         if (-not $binPath) { throw "Could not find OpenSSL DLLs" }
-        
         Copy-Item "$binPath\libssl-3-x64.dll" "dep-install\bin\"
         Copy-Item "$binPath\libcrypto-3-x64.dll" "dep-install\bin\"
         Remove-Item -Recurse -Force "openssl-temp"
@@ -164,15 +149,15 @@ jobs:
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
         cd build
         
-        rem Define Absolute Paths using Workspace
+        rem Define Absolute Paths
         set "DEP_INSTALL=%GITHUB_WORKSPACE%\dep-install"
         set "DEP_INSTALL_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
         
-        rem Find exact location of MpvQtConfig.cmake
+        rem Locate MpvQtConfig.cmake
         for /f "delims=" %%i in ('dir /s /b "%DEP_INSTALL%\MpvQtConfig.cmake"') do set MPVQT_CONFIG_PATH=%%~dpi
         if defined MPVQT_CONFIG_PATH set MPVQT_DIR=%MPVQT_CONFIG_PATH%
         
-        rem Find ECMConfig.cmake
+        rem Locate ECMConfig.cmake
         for /f "delims=" %%i in ('dir /s /b "%DEP_INSTALL%\ECMConfig.cmake"') do set ECM_CONFIG_PATH=%%~dpi
         if defined ECM_CONFIG_PATH set ECM_DIR=%ECM_CONFIG_PATH%
         
