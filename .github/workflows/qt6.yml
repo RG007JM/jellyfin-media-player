@@ -24,7 +24,7 @@ jobs:
         arch: "win64_msvc2022_64"
         modules: "qtwebengine"
 
-    - name: Setup Build Environment
+    - name: Setup Build Environment (Ninja, Dirs)
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
@@ -45,20 +45,23 @@ jobs:
     - name: Prepare Libmpv
       shell: pwsh
       run: |
-        # Download Libmpv
-        Invoke-WebRequest -Uri "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20251116-git-701201b.7z/download" -OutFile "mpv.7z"
+        # Use downloads.sourceforge.net for direct resolution
+        $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20251214-git-f7be2ee.7z"
+        
+        # UserAgent 'curl' forces SourceForge to give a redirect, not an HTML page
+        Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
+        
+        # Validation
+        if ((Get-Item "mpv.7z").Length -lt 1000000) { throw "Download failed: mpv.7z is too small" }
+        
         7z x mpv.7z -ompv
         
         Set-Location mpv
         
-        # Create .def file from DLL using dumpbin (since we don't have gendef)
-        # We need the VS environment variables for dumpbin
+        # Create .def file from DLL using dumpbin
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /exports libmpv-2.dll > exports.txt"
         
         $defContent = @("LIBRARY libmpv-2.dll", "EXPORTS")
-        # Parse dumpbin output to get function names
-        # Format is usually:  ordinal hint RVA      name
-        # We want just the name
         $lines = Get-Content exports.txt
         foreach ($line in $lines) {
             if ($line -match "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)") {
@@ -81,7 +84,7 @@ jobs:
       shell: bash
       run: |
         set -e
-        # ECM
+        # ECM (Extra CMake Modules)
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
         cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX=../dep-install
@@ -91,6 +94,7 @@ jobs:
         # MpvQt
         git clone https://github.com/KDE/mpvqt.git
         cd mpvqt
+        # Note: We point CMAKE_PREFIX_PATH to dep-install (for ECM) and Qt6_DIR
         cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX=../dep-install -DCMAKE_PREFIX_PATH="$PWD/../dep-install;$Qt6_DIR"
         ninja -C build install
         cd ..
@@ -100,9 +104,11 @@ jobs:
       run: |
         mkdir -p bundle/win
         
+        # VC++ Redist
         curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
         cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
         
+        # OpenSSL 3.3.0 (Win64) - Required for Qt 6.8 Network
         curl -L https://mirror.firedaemon.com/openssl/openssl-3.3.0-dev-1-ga91d575-windows-x64.zip -o openssl.zip
         unzip -o openssl.zip -d openssl-temp
         cp openssl-temp/x64/bin/libssl-3-x64.dll dep-install/bin/
@@ -139,12 +145,15 @@ jobs:
         ninja
         ninja install
         
+        echo Deploying Qt...
         %Qt6_DIR%\bin\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
         
+        rem Copy dependencies to output folder
         copy %GITHUB_WORKSPACE%\dep-install\bin\libssl-3-x64.dll output\
         copy %GITHUB_WORKSPACE%\dep-install\bin\libcrypto-3-x64.dll output\
         copy %GITHUB_WORKSPACE%\dep-install\bin\libmpv-2.dll output\
         
+        rem Build Installer (WiX)
         ninja windows_package
 
     - name: Archive installer
