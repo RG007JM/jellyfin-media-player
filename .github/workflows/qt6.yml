@@ -71,10 +71,11 @@ jobs:
         # Create .lib from .def
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
         
-        # Install to dep-install
-        Copy-Item -Recurse include/* ../dep-install/include/
-        Copy-Item libmpv.lib ../dep-install/lib/
-        Copy-Item libmpv-2.dll ../dep-install/bin/
+        # CRITICAL FIX: The headers are already in include/mpv/, so copy the entire include folder
+        # This ensures dep-install/include/mpv/client.h exists (not dep-install/include/mpv/mpv/client.h)
+        Copy-Item -Recurse -Force include\* ..\dep-install\include\
+        Copy-Item libmpv.lib ..\dep-install\lib\
+        Copy-Item libmpv-2.dll ..\dep-install\bin\
         
         Set-Location ..
 
@@ -92,72 +93,7 @@ jobs:
         # MpvQt
         git clone https://github.com/KDE/mpvqt.git
         cd mpvqt
-        # Explicitly pass CMAKE_INCLUDE_PATH and MPV_INCLUDE_DIR to fix missing header
         cmake -B build -GNinja \
           -DCMAKE_INSTALL_PREFIX=../dep-install \
-          -DCMAKE_PREFIX_PATH="$PWD/../dep-install;$Qt6_DIR" \
-          -DCMAKE_INCLUDE_PATH="$PWD/../dep-install/include" \
-          -DMPV_INCLUDE_DIR="$PWD/../dep-install/include"
+          -DCMAKE_PREFIX_PATH="$PWD/../dep-install;$Qt6_DIR"
         ninja -C build install
-        cd ..
-
-    - name: Download & Stage VC++ Redist and OpenSSL 3
-      shell: bash
-      run: |
-        mkdir -p bundle/win
-        
-        # VC++ Redist
-        curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
-        cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
-        
-        # OpenSSL 3.3.0 (Win64)
-        curl -L https://mirror.firedaemon.com/openssl/openssl-3.3.0-dev-1-ga91d575-windows-x64.zip -o openssl.zip
-        unzip -o openssl.zip -d openssl-temp
-        cp openssl-temp/x64/bin/libssl-3-x64.dll dep-install/bin/
-        cp openssl-temp/x64/bin/libcrypto-3-x64.dll dep-install/bin/
-        rm -rf openssl-temp openssl.zip
-
-    - name: Patch WiX Bundle.wxs
-      shell: pwsh
-      run: |
-        $bundle  = "bundle/win/Bundle.wxs"
-        if (Test-Path $bundle) {
-            $content = Get-Content -Raw $bundle -Encoding UTF8
-            $pattern = 'Source=".*vcredist_x64.exe"'
-            $patched = $content -replace $pattern, 'Source="bundle\win\vcredist_x64.exe"'
-            $pattern2 = 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe'
-            $patched = [regex]::Replace($patched, $pattern2, 'vcredist_x64.exe')
-            Set-Content -LiteralPath $bundle -Value $patched -Encoding UTF8
-        }
-
-    - name: Build Jellyfin Desktop
-      shell: cmd
-      run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
-        cd build
-        
-        cmake -GNinja ^
-          -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
-          -DCMAKE_INSTALL_PREFIX=output ^
-          -DCMAKE_PREFIX_PATH="%GITHUB_WORKSPACE%\dep-install;%Qt6_DIR%" ^
-          -DQTROOT="%Qt6_DIR%" ^
-          ..
-        
-        ninja
-        ninja install
-        
-        echo Deploying Qt...
-        %Qt6_DIR%\bin\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
-        
-        copy %GITHUB_WORKSPACE%\dep-install\bin\libssl-3-x64.dll output\
-        copy %GITHUB_WORKSPACE%\dep-install\bin\libcrypto-3-x64.dll output\
-        copy %GITHUB_WORKSPACE%\dep-install\bin\libmpv-2.dll output\
-        
-        ninja windows_package
-
-    - name: Archive installer
-      uses: actions/upload-artifact@v4
-      with:
-        name: jellyfin-desktop-windows
-        path: ${{ github.workspace }}/build/JellyfinMediaPlayer-*.exe
