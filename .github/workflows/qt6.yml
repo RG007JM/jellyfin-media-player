@@ -20,7 +20,7 @@ jobs:
       with:
         version: "6.8.0"
         arch: "win64_msvc2022_64"
-        modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning"
+        modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning qtshadertools qt5compat qtimageformats"
 
     - name: Setup Build Environment (Ninja, Dirs)
       shell: cmd
@@ -157,6 +157,10 @@ jobs:
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
+        
+        rem OPTIONAL: Remove Qt6::DBus from CMakeLists if it causes issues on Windows
+        powershell -Command "(Get-Content src/CMakeLists.txt) -replace 'Qt6::DBus', '' | Set-Content src/CMakeLists.txt"
+        
         cd build
         
         rem Define Absolute Paths
