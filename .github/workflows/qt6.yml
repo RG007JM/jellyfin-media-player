@@ -90,9 +90,12 @@ jobs:
         cd mpvqt
         
         rem PATCH: Fix MSVC C2027 (incomplete type deletion)
-        rem We use PowerShell to replace inline destructor with declaration and add definition to cpp
+        rem Clean PowerShell patch to avoid syntax errors
         powershell -Command "(Get-Content src/mpvcontroller.h) -replace '~MpvController\(\) = default;', '~MpvController();' | Set-Content src/mpvcontroller.h"
-        powershell -Command "Add-Content src/mpvcontroller.cpp '`nMpvController::~MpvController() = default;'"
+        
+        rem Append to cpp file safely
+        echo. >> src\mpvcontroller.cpp
+        echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
         
         cmake -B build -GNinja ^
           -DCMAKE_C_COMPILER=cl ^
