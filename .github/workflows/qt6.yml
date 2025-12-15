@@ -1,4 +1,4 @@
-name: build
+name: Build Qt6 Windows x64
 
 on:
   workflow_dispatch:
@@ -21,10 +21,11 @@ jobs:
       uses: jurplel/install-qt-action@v4
       with:
         version: "6.8.0"
-        arch: "win64_msvc2019_64"
+        # FIXED: Changed from win64_msvc2019_64 to win64_msvc2022_64
+        arch: "win64_msvc2022_64"
         modules: "qtwebengine"
 
-    - name: Setup Build Environment (Ninja, MSVC, Dirs)
+    - name: Setup Build Environment (Ninja, Dirs)
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
@@ -39,23 +40,23 @@ jobs:
         tar -xf ninja.zip -C dep-install\bin
         del ninja.zip
         
-        rem Add dep-install\bin to PATH for future steps
+        rem Add dep-install\bin to PATH
         echo %GITHUB_WORKSPACE%\dep-install\bin>> %GITHUB_PATH%
 
     - name: Prepare Dependencies (Libmpv, ECM, MpvQt)
       shell: bash
       run: |
         set -e
-        # 1. Libmpv (Dev) - Using the version from your snippet
+        # 1. Libmpv (Dev) - Using your version
         curl -L "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20251116-git-701201b.7z/download" -o mpv.7z
         7z x mpv.7z -ompv
         
-        # Prepare Libmpv for MSVC (create .lib from .dll)
+        # Prepare Libmpv for MSVC
         cd mpv
         ./gendef.exe libmpv-2.dll
         dlltool -d libmpv-2.def -l libmpv.lib -D libmpv-2.dll
         
-        # Install Libmpv to dep-install prefix so CMake finds it automatically
+        # Install Libmpv to dep-install prefix
         cp -r include/* ../dep-install/include/
         cp libmpv.lib ../dep-install/lib/
         cp libmpv-2.dll ../dep-install/bin/
@@ -64,15 +65,14 @@ jobs:
         # 2. Extra CMake Modules (ECM) - Required by MpvQt
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
-        # Checkout a stable tag if needed, master is usually fine for KDE
         cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX=../dep-install
         ninja -C build install
         cd ..
         
-        # 3. MpvQt - Build and install manually to ensure it exists
-        # Even if it's a submodule, building it externally ensures it's found as a package
+        # 3. MpvQt - Build and install manually
         git clone https://github.com/KDE/mpvqt.git
         cd mpvqt
+        # Qt6_DIR is provided by install-qt-action
         cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX=../dep-install -DCMAKE_PREFIX_PATH="$PWD/../dep-install;$Qt6_DIR"
         ninja -C build install
         cd ..
@@ -86,11 +86,9 @@ jobs:
         curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
         cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
         
-        # OpenSSL 3.3.0 (Win64) - Required for Qt 6 Network
-        # Using FireDaemon mirror for reliable pre-built binaries, or substitute your preferred source
+        # OpenSSL 3.3.0 (Win64) - Required for Qt 6.8 Network
         curl -L https://mirror.firedaemon.com/openssl/openssl-3.3.0-dev-1-ga91d575-windows-x64.zip -o openssl.zip
         unzip -o openssl.zip -d openssl-temp
-        # Move DLLs to dep-install/bin for running/deploying
         cp openssl-temp/x64/bin/libssl-3-x64.dll dep-install/bin/
         cp openssl-temp/x64/bin/libcrypto-3-x64.dll dep-install/bin/
         rm -rf openssl-temp openssl.zip
@@ -101,31 +99,20 @@ jobs:
         $bundle  = "bundle/win/Bundle.wxs"
         if (Test-Path $bundle) {
             $content = Get-Content -Raw $bundle -Encoding UTF8
-            # Patch the hardcoded VS path to just the filename (we place it next to the msi)
             $pattern = 'Source=".*vcredist_x64.exe"'
             $patched = $content -replace $pattern, 'Source="bundle\win\vcredist_x64.exe"'
-            # Also fix any absolute paths if present (matches your old logic)
             $pattern2 = 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe'
             $patched = [regex]::Replace($patched, $pattern2, 'vcredist_x64.exe')
-            
             Set-Content -LiteralPath $bundle -Value $patched -Encoding UTF8
-            Write-Host "Patched Bundle.wxs"
-        } else {
-            Write-Warning "bundle/win/Bundle.wxs not found, skipping patch"
         }
 
     - name: Build Jellyfin Desktop
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        
-        rem Add WiX to PATH
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
-        
         cd build
         
-        rem Configure CMake
-        rem We add dep-install to CMAKE_PREFIX_PATH so it finds MpvQt and ECM
         cmake -GNinja ^
           -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
           -DCMAKE_INSTALL_PREFIX=output ^
@@ -136,18 +123,13 @@ jobs:
         ninja
         ninja install
         
-        rem Deploy Qt Dependencies
         echo Deploying Qt...
         %Qt6_DIR%\bin\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
         
-        rem Copy OpenSSL DLLs to output
         copy %GITHUB_WORKSPACE%\dep-install\bin\libssl-3-x64.dll output\
         copy %GITHUB_WORKSPACE%\dep-install\bin\libcrypto-3-x64.dll output\
-        
-        rem Copy Libmpv DLL to output
         copy %GITHUB_WORKSPACE%\dep-install\bin\libmpv-2.dll output\
         
-        rem Build Installer (WiX)
         ninja windows_package
 
     - name: Archive installer
