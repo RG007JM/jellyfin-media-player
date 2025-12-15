@@ -22,48 +22,51 @@ jobs:
         arch: "win64_msvc2022_64"
         modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning qtshadertools qt5compat qtimageformats qtserialport"
 
-    - name: Setup Build Environment
-      shell: pwsh
+    - name: Setup Build Environment (Ninja, Dirs, Reuse)
+      shell: cmd
       run: |
-        $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        cmd.exe /c "call `"$vsPath`" && set > %TEMP%\vcvars.txt"
-        Get-Content "$env:TEMP\vcvars.txt" | Foreach-Object {
-          if ($_ -match "^(.*?)=(.*)$") {
-            [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
-          }
-        }
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        mkdir dep-install
+        mkdir dep-install\include
+        mkdir dep-install\lib
+        mkdir dep-install\bin
         
-        New-Item -ItemType Directory -Force -Path dep-install\bin, dep-install\include, dep-install\lib
-        
-        Invoke-WebRequest -Uri "https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip" -OutFile ninja.zip
+        curl -L https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip -o ninja.zip
         tar -xf ninja.zip -C dep-install\bin
-        Remove-Item ninja.zip
+        del ninja.zip
         
-        echo "$((Get-Location).Path)\dep-install\bin" >> $env:GITHUB_PATH
+        echo %GITHUB_WORKSPACE%\dep-install\bin>> %GITHUB_PATH%
         pip install reuse
 
     - name: Install Vulkan SDK
       shell: pwsh
       run: |
         $url = "https://sdk.lunarg.com/sdk/download/1.3.296.0/windows/VulkanSDK-1.3.296.0-Installer.exe"
-        Invoke-WebRequest -Uri $url -OutFile "VulkanSDK.exe" -UserAgent "curl/7.88.1"
-        Start-Process -FilePath .\VulkanSDK.exe -ArgumentList "--root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install" -Wait
+        $out = "VulkanSDK.exe"
         
-        if (Test-Path "C:\VulkanSDK\Bin") { $sdkRoot = "C:\VulkanSDK" } 
-        else { $sdkRoot = Get-ChildItem "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName }
+        Invoke-WebRequest -Uri $url -OutFile $out -UserAgent "curl/7.88.1"
+        Start-Process -FilePath .\$out -ArgumentList "--root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install" -Wait
+        
+        if (Test-Path "C:\VulkanSDK\Bin") {
+            $sdkRoot = "C:\VulkanSDK"
+        } else {
+            $sdkRoot = Get-ChildItem "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
+        }
         
         echo "VULKAN_SDK=$sdkRoot" >> $env:GITHUB_ENV
         echo "VK_SDK_PATH=$sdkRoot" >> $env:GITHUB_ENV
         echo "$sdkRoot\Bin" >> $env:GITHUB_PATH
-        Remove-Item VulkanSDK.exe
+        Remove-Item $out
 
-    - name: Prepare Libmpv
+    - name: Prepare Libmpv (Stable 20240922)
       shell: pwsh
       run: |
-        $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20251214-git-f7be2ee.7z"
+        # CHANGED: Using specific stable snapshot provided by user to prevent crash
+        $url = "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z/download"
         Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
         
         if ((Get-Item mpv.7z).Length -lt 1000) { throw "Download failed (file too small)" }
+        
         7z x mpv.7z -ompv
         Set-Location mpv
         
@@ -90,43 +93,37 @@ jobs:
         Copy-Item -Force "$root\lib\x64\SDL2.dll" "dep-install\bin\"
         Remove-Item -Recurse -Force "sdl2-temp", "sdl2.zip"
 
-    - name: Build Extra CMake Modules
-      shell: pwsh
+    - name: Prepare ECM and MpvQt
+      shell: cmd
       run: |
-        $env:CC="cl"
-        $env:CXX="cl"
-        $installDir = "$((Get-Location).Path)\dep-install"
-        git clone https://github.com/KDE/extra-cmake-modules.git
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        set "INSTALL_DIR=%GITHUB_WORKSPACE%\dep-install"
+        set "INSTALL_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
+        set "INCLUDE_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install/include"
         
-        cmake -S extra-cmake-modules -B build-ecm -GNinja -DCMAKE_INSTALL_PREFIX="$installDir"
-        ninja -C build-ecm install
-
-    - name: Build MpvQt
-      shell: pwsh
-      run: |
-        $env:CC="cl"
-        $env:CXX="cl"
-        $root = (Get-Location).Path
-        $installDir = "$root/dep-install"
-        $installDirFwd = $installDir.Replace('\', '/')
+        git clone https://github.com/KDE/extra-cmake-modules.git
+        cd extra-cmake-modules
+        cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
+        ninja -C build install
+        cd ..
         
         git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
-        Set-Location mpvqt
+        cd mpvqt
         
-        $c = Get-Content src/mpvcontroller.h -Raw
-        $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''
-        $nl = [Environment]::NewLine
-        $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();')
-        Set-Content src/mpvcontroller.h $c
-        Add-Content src/mpvcontroller.cpp "`nMpvController::~MpvController() = default;"
+        rem --- PATCH MPVQT FOR MSVC ---
+        powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
+        echo. >> src\mpvcontroller.cpp
+        echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
         
-        cmake -B build -GNinja `
-            -DCMAKE_INSTALL_PREFIX="$installDir" `
-            -DCMAKE_PREFIX_PATH="$installDir;$env:Qt6_DIR" `
-            -DECM_DIR="$installDirFwd/share/ECM/cmake" `
-            -DCMAKE_CXX_FLAGS="-I`"$installDirFwd/include`""
-            
+        rem --- FORCE INCLUDE PATH FOR MPVQT ---
+        cmake -B build -GNinja ^
+          -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" ^
+          -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" ^
+          -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" ^
+          -DCMAKE_CXX_FLAGS="-I\"%INCLUDE_DIR_FWD%\""
+          
         ninja -C build install
+        cd ..
 
     - name: Download & Stage VC++ Redist and OpenSSL
       shell: pwsh
@@ -153,21 +150,19 @@ jobs:
             Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Configure and Build Jellyfin Desktop
+    - name: Build Jellyfin Desktop
       shell: pwsh
       run: |
-        $env:CC="cl"
-        $env:CXX="cl"
         $root = (Get-Location).Path.Replace("\", "/")
-        $dep = "$root/dep-install"
-        $libMpv = "$dep/lib/libmpv.lib"
-        $incMpv = "$dep/include"
-        $mpvQtDir = "$dep/lib/cmake/MpvQt"
+        $depInstall = "$root/dep-install"
+        $libMpv = "$depInstall/lib/libmpv.lib"
+        $incMpv = "$depInstall/include"
+        $mpvQtDir = "$depInstall/lib/cmake/MpvQt"
         $installPrefix = "$root/output"
 
-        # Override FindMPV
+        # --- OVERRIDE FindMPV.cmake ---
         $cmakeMod = "CMakeModules/FindMPV.cmake"
-        @"
+        $overrideContent = @"
         set(MPV_FOUND TRUE)
         set(MPV_INCLUDE_DIR "$incMpv")
         set(MPV_LIBRARY "$libMpv")
@@ -175,61 +170,122 @@ jobs:
         set(MPV_INCLUDE_DIRS "$incMpv")
         if(NOT TARGET MPV::MPV)
           add_library(MPV::MPV UNKNOWN IMPORTED)
-          set_target_properties(MPV::MPV PROPERTIES IMPORTED_LOCATION "$libMpv" INTERFACE_INCLUDE_DIRECTORIES "$incMpv")
+          set_target_properties(MPV::MPV PROPERTIES
+            IMPORTED_LOCATION "$libMpv"
+            INTERFACE_INCLUDE_DIRECTORIES "$incMpv"
+          )
         endif()
-        "@ | Set-Content $cmakeMod
+        "@
+        Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
-        # Patch Codecs
+        # --- PATCHES (Simplified Syntax) ---
+        $f='src/CMakeLists.txt'
+        (Get-Content $f) | Where-Object { 
+            $_ -notmatch 'mpris/MprisComponent' -and 
+            $_ -notmatch 'add_subdirectory.mpris.' -and 
+            $_ -notmatch 'Qt6::DBus' 
+        } | Set-Content $f
+
+        $f='src/core/ComponentManager.cpp'
+        (Get-Content $f) | Where-Object { $_ -notmatch 'MprisComponent' } | Set-Content $f
+        if (Test-Path src\mpris) { Remove-Item -Recurse -Force src\mpris }
+        
+        $f='src/CMakeLists.txt'
+        (Get-Content $f) | Where-Object { $_ -notmatch 'taskbar' -and $_ -notmatch 'TaskbarComponent' } | Set-Content $f
+        
+        $f='src/core/ComponentManager.cpp'
+        (Get-Content $f) | Where-Object { $_ -notmatch 'TaskbarComponent' } | Set-Content $f
+        
+        $f='src/ui/WindowManager.cpp'
+        (Get-Content $f) | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'm_taskbar' } | Set-Content $f
+        if (Test-Path src\taskbar) { Remove-Item -Recurse -Force src\taskbar }
+
+        if (Test-Path tests/CMakeLists.txt) { 
+            $f='tests/CMakeLists.txt'
+            (Get-Content $f) | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'MprisComponent' } | Set-Content $f
+        }
+        
         $f='src/player/CodecsComponent.cpp'
-        Set-Content $f ("#include <windows.h>`n" + (Get-Content $f -Raw))
+        $c=Get-Content $f -Raw
+        $c='#include <windows.h>' + [Environment]::NewLine + $c
+        Set-Content $f $c
 
-        # Build
-        cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$dep;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" .
-        ninja -C build
+        # --- CMAKE & NINJA ---
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+        
+        Set-Location build
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja"
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
 
-    - name: Install and Fix Deployment
+    - name: Deploy Qt and Finalize Dependencies
       shell: pwsh
       run: |
-        # 1. RUN INSTALL
-        ninja -C build install
-        
         $outDir = "$((Get-Location).Path)/output"
-        $depBin = "dep-install/bin"
-        if (-not (Test-Path $outDir)) { throw "Output dir missing!" }
-
-        # 2. WINDEPLOYQT
-        $qmlDir = "dep-install/lib/qml"
-        if (-not (Test-Path $qmlDir)) { $qmlDir = "dep-install/qml" }
-        Write-Host "Running windeployqt with QML: $qmlDir"
-        & "windeployqt" --verbose 2 --release --force --qmldir src/ui --qmlimport "$qmlDir" --compiler-runtime --no-opengl-sw --xml "$outDir/Jellyfin Desktop.exe"
-
-        # 3. FIX VCRUNTIME (Recursive)
+        $depInstall = "$((Get-Location).Path)/dep-install"
+        $qtBin = "$env:Qt6_DIR/bin"
+        
+        Write-Host "Deploying to: $outDir"
+        if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
+        
+        # --- FIX: Pass MpvQt QML Import Path Conditionally ---
+        $exePath = "$outDir/Jellyfin Desktop.exe"
+        $mpvQmlPath = "$depInstall/lib/qml"
+        $qmlArgs = @()
+        if (Test-Path $mpvQmlPath) {
+             $qmlArgs += "--qmlimport"
+             $qmlArgs += "$mpvQmlPath"
+        } elseif (Test-Path "$depInstall/qml") {
+             $qmlArgs += "--qmlimport"
+             $qmlArgs += "$depInstall/qml"
+        } else {
+             Write-Warning "No MpvQt QML module found."
+        }
+        
+        Write-Host "Running windeployqt..."
+        & "windeployqt" --release --force `
+            --qmldir src/ui `
+            @qmlArgs `
+            --compiler-runtime `
+            --no-opengl-sw `
+            --xml "$exePath"
+            
+        # --- FIX: Robust VC Redist Copy ---
+        Write-Host "Locating correct x64 VC Redist..."
         $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
-        $dllSrc = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
-        $redistDir = $dllSrc.DirectoryName
-        Write-Host "Copying VCRedist from: $redistDir"
-        copy "$redistDir/*.dll" $outDir -Force
-
-        # 4. COPY DEPS
-        $deps = @("libssl-3-x64.dll", "libcrypto-3-x64.dll", "libmpv-2.dll", "SDL2.dll", "MpvQt.dll")
-        foreach ($d in $deps) {
-            if (Test-Path "$depBin/$d") { copy "$depBin/$d" $outDir -Force }
-            else { Write-Error "Missing $d" }
+        $runtimeDll = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
+        
+        if (-not $runtimeDll) { throw "Could not locate x64 VC Redist directory!" }
+        $redistDir = $runtimeDll.DirectoryName
+        Write-Host "Source Redist Dir: $redistDir"
+        
+        $dlls = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll")
+        foreach ($dll in $dlls) {
+            $src = "$redistDir\$dll"
+            if (Test-Path $src) { Copy-Item -Force $src "$outDir\" }
         }
 
-        # 5. SAFETY COPY QT DLLS
-        $qtBin = "$env:Qt6_DIR/bin"
-        $qtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Quick.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6OpenGL.dll", "Qt6Qml.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll", "Qt6Svg.dll")
-        foreach ($q in $qtDlls) {
-            if (-not (Test-Path "$outDir/$q")) {
-                Write-Warning "Force copying $q"
-                copy "$qtBin/$q" $outDir -Force
+        # --- Manual Dependency Safety Net ---
+        $thirdPartyDeps = @(
+            @{ Name="libssl-3-x64.dll"; Path="$depInstall/bin/libssl-3-x64.dll" },
+            @{ Name="libcrypto-3-x64.dll"; Path="$depInstall/bin/libcrypto-3-x64.dll" },
+            @{ Name="libmpv-2.dll"; Path="$depInstall/bin/libmpv-2.dll" },
+            @{ Name="SDL2.dll"; Path="$depInstall/bin/SDL2.dll" },
+            @{ Name="MpvQt.dll"; Path="$depInstall/bin/MpvQt.dll" }
+        )
+        foreach ($dep in $thirdPartyDeps) {
+            if (Test-Path $dep.Path) { Copy-Item -Force $dep.Path $outDir }
+            else { Write-Error "CRITICAL: Missing dependency $($dep.Name)" }
+        }
+
+        # --- QT Safety Copy ---
+        $criticalQtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll")
+        foreach ($qDll in $criticalQtDlls) {
+            if (-not (Test-Path "$outDir\$qDll")) {
+                Write-Warning "Windeployqt missed $qDll. Force copying..."
+                Copy-Item -Force "$qtBin\$qDll" $outDir
             }
         }
-
-        # 6. VERIFY
-        if (Test-Path "$outDir/Qt6Quick.dll") { Write-Host "VERIFIED: Qt6Quick.dll is present." }
-        else { Write-Error "FATAL: Qt6Quick.dll is MISSING from output!" }
 
     - name: Create Portable Zip
       shell: pwsh
@@ -241,7 +297,7 @@ jobs:
         name: jellyfin-desktop-portable
         path: Jellyfin-Desktop-Portable.zip
 
-    - name: Build Installer (WiX)
+    - name: Build Installer Package
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
@@ -249,8 +305,8 @@ jobs:
         cd build
         ninja windows_package
 
-    - name: Upload Installer
+    - name: Archive installer
       uses: actions/upload-artifact@v4
       with:
-        name: jellyfin-desktop-installer
+        name: jellyfin-desktop-windows
         path: build/JellyfinDesktop-*.exe
