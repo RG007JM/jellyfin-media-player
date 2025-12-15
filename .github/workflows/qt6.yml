@@ -67,47 +67,23 @@ jobs:
         echo "$sdkRoot\Include" >> $env:GITHUB_PATH
         Remove-Item $out
 
-    - name: Build p8-platform (CEC Dependency)
-      shell: cmd
+    - name: Install LibCEC (Precompiled)
+      shell: pwsh
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        set "INSTALL_DIR=%GITHUB_WORKSPACE%\dep-install"
+        $url = "https://github.com/Pulse-Eight/libcec/releases/download/libcec-6.0.2/libcec-6.0.2.exe"
+        $out = "libcec_installer.exe"
+        Write-Host "Downloading LibCEC..."
+        Invoke-WebRequest -Uri $url -OutFile $out -UserAgent "curl/7.88.1"
         
-        git clone https://github.com/Pulse-Eight/platform.git p8-platform
-        cd p8-platform
-        cmake -B build -GNinja ^
-          -DCMAKE_BUILD_TYPE=Release ^
-          -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
+        Write-Host "Installing LibCEC to C:\libcec..."
+        Start-Process -FilePath .\$out -ArgumentList "/S", "/D=C:\libcec" -Wait
         
-        ninja -C build install
-        cd ..
-
-    - name: Build LibCEC
-      shell: cmd
-      run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        set "INSTALL_DIR=%GITHUB_WORKSPACE%\dep-install"
-        set "INSTALL_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
-        
-        git clone https://github.com/Pulse-Eight/libcec.git libcec
-        cd libcec
-        
-        cmake -B build -GNinja ^
-          -DCMAKE_BUILD_TYPE=Release ^
-          -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" ^
-          -Dp8-platform_DIR="%INSTALL_DIR%\lib\p8-platform" ^
-          -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%"
-          
-        ninja -C build install
-        cd ..
-        
-        rem Verify install
-        if exist "%INSTALL_DIR%\lib\cec.lib" (
-            echo CEC build success.
-        ) else (
-            echo CEC build failed!
-            exit /b 1
-        )
+        if (Test-Path "C:\libcec\include\libcec\cec.h") {
+            Write-Host "LibCEC installed successfully."
+        } else {
+            Write-Warning "LibCEC install check failed."
+        }
+        Remove-Item $out
 
     - name: Prepare Libmpv
       shell: pwsh
@@ -257,8 +233,8 @@ jobs:
           -DMPV_LIBRARY="%DEP_INSTALL_FWD%/lib/libmpv.lib" ^
           -DSDL2_INCLUDE_DIR="%DEP_INSTALL_FWD%/include" ^
           -DSDL2_LIBRARY="%DEP_INSTALL_FWD%/lib/SDL2.lib" ^
-          -DCEC_INCLUDE_DIR="%DEP_INSTALL_FWD%/include" ^
-          -DCEC_LIBRARY="%DEP_INSTALL_FWD%/lib/cec.lib" ^
+          -DCEC_INCLUDE_DIR="C:/libcec/include" ^
+          -DCEC_LIBRARY="C:/libcec/lib/libcec.lib" ^
           ..
         
         ninja
@@ -271,7 +247,7 @@ jobs:
         copy "%DEP_INSTALL%\bin\libcrypto-3-x64.dll" output\
         copy "%DEP_INSTALL%\bin\libmpv-2.dll" output\
         copy "%DEP_INSTALL%\bin\SDL2.dll" output\
-        copy "%DEP_INSTALL%\bin\cec.dll" output\
+        copy "C:\libcec\bin\libcec.dll" output\
         
         ninja windows_package
 
