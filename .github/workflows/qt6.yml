@@ -46,7 +46,7 @@ jobs:
         $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20251214-git-f7be2ee.7z"
         Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
         
-        if ((Get-Item "mpv.7z").Length -lt 1000000) { throw "Download failed: mpv.7z is too small" }
+        if ((Get-Item "mpv.7z").Length -lt 1000000) { throw "Download failed" }
         
         7z x mpv.7z -ompv
         Set-Location mpv
@@ -63,40 +63,55 @@ jobs:
         $defContent | Set-Content libmpv-2.def
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
         
-        # Correctly stage headers
+        # Correctly stage headers and libs
+        # Headers go to dep-install/include/mpv/client.h
         Copy-Item -Recurse -Force include\* ..\dep-install\include\
         Copy-Item libmpv.lib ..\dep-install\lib\
         Copy-Item libmpv-2.dll ..\dep-install\bin\
-        Set-Location ..
 
     - name: Prepare ECM and MpvQt
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         
-        rem ECM (Extra CMake Modules)
+        rem Define Absolute Paths
+        set "INSTALL_DIR=%GITHUB_WORKSPACE%\dep-install"
+        set "INSTALL_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
+        
+        rem --- 1. Build Extra CMake Modules (ECM) ---
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
+        
         cmake -B build -GNinja ^
           -DCMAKE_C_COMPILER=cl ^
           -DCMAKE_CXX_COMPILER=cl ^
-          -DCMAKE_INSTALL_PREFIX=../dep-install
+          -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
+        
         ninja -C build install
+        if %errorlevel% neq 0 exit /b %errorlevel%
         cd ..
         
-        rem MpvQt
+        rem --- 2. Build MpvQt ---
         git clone https://github.com/KDE/mpvqt.git
         cd mpvqt
         
-        rem Force MSVC compiler and include path
+        rem Ensure we point to the ECM we just installed
+        rem We use forward slashes for CMake paths to be safe
+        
         cmake -B build -GNinja ^
           -DCMAKE_C_COMPILER=cl ^
           -DCMAKE_CXX_COMPILER=cl ^
-          -DCMAKE_INSTALL_PREFIX=../dep-install ^
-          -DCMAKE_PREFIX_PATH="%cd%/../dep-install;%Qt6_DIR%" ^
-          -DCMAKE_CXX_FLAGS="-I%cd%/../dep-install/include -EHsc"
-          
+          -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" ^
+          -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" ^
+          -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" ^
+          -DCMAKE_CXX_FLAGS="-I%INSTALL_DIR_FWD%/include -EHsc"
+        
         ninja -C build install
+        if %errorlevel% neq 0 exit /b %errorlevel%
+        
+        rem Verify installation
+        echo Verifying MpvQtConfig.cmake exists...
+        dir /s /b "%INSTALL_DIR%\MpvQtConfig.cmake"
         cd ..
 
     - name: Download & Stage VC++ Redist and OpenSSL 3
@@ -110,39 +125,24 @@ jobs:
         Invoke-WebRequest -Uri $vcUrl -OutFile "vc_redist.x64.exe" -UserAgent "curl/7.88.1"
         Copy-Item "vc_redist.x64.exe" "bundle/win/vcredist_x64.exe"
         
-        # OpenSSL 3.6.0 - Direct FireDaemon CDN (reliable, no mirror subdomain)
+        # OpenSSL 3.6.0 - Direct FireDaemon CDN
         $sslUrl = "https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-3.6.0.zip"
         $zipPath = "openssl.zip"
         
         Write-Host "Downloading OpenSSL from $sslUrl..."
-        try {
-            Invoke-WebRequest -Uri $sslUrl -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -MaximumRedirection 5
-        } catch {
-            Write-Error "Download failed: $_"
-            exit 1
-        }
+        Invoke-WebRequest -Uri $sslUrl -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         
-        if ((Get-Item $zipPath).Length -lt 1000000) { 
-            Write-Error "OpenSSL zip is too small ($((Get-Item $zipPath).Length) bytes)."
-            exit 1 
-        }
+        if ((Get-Item $zipPath).Length -lt 1000000) { throw "Download failed" }
         
-        Write-Host "Extracting OpenSSL..."
         Expand-Archive -Path $zipPath -DestinationPath "openssl-temp" -Force
         
-        # The ZIP contains x64, x86, and ARM64 folders - we want x64
+        # Find x64 bin folder
         $binPath = Get-ChildItem -Path "openssl-temp" -Recurse -Filter "libssl-3-x64.dll" | Select-Object -First 1 | Split-Path -Parent
         
-        if (-not $binPath) {
-            Write-Error "Could not find libssl-3-x64.dll in extracted OpenSSL zip"
-            Get-ChildItem -Path "openssl-temp" -Recurse | Select-Object FullName
-            exit 1
-        }
+        if (-not $binPath) { throw "Could not find OpenSSL DLLs" }
         
-        Write-Host "Found OpenSSL DLLs at: $binPath"
         Copy-Item "$binPath\libssl-3-x64.dll" "dep-install\bin\"
         Copy-Item "$binPath\libcrypto-3-x64.dll" "dep-install\bin\"
-        
         Remove-Item -Recurse -Force "openssl-temp"
         Remove-Item -Force $zipPath
 
@@ -154,8 +154,6 @@ jobs:
             $content = Get-Content -Raw $bundle -Encoding UTF8
             $pattern = 'Source=".*vcredist_x64.exe"'
             $patched = $content -replace $pattern, 'Source="bundle\win\vcredist_x64.exe"'
-            $pattern2 = 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe'
-            $patched = [regex]::Replace($patched, $pattern2, 'vcredist_x64.exe')
             Set-Content -LiteralPath $bundle -Value $patched -Encoding UTF8
         }
 
@@ -166,13 +164,16 @@ jobs:
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
         cd build
         
-        rem Find MpvQtConfig.cmake location
-        for /f "delims=" %%i in ('dir /s /b ..\dep-install\MpvQtConfig.cmake') do set MPVQT_CONFIG_PATH=%%~dpi
-        rem Remove trailing backslash if present (though dpi usually has one, we can use it directly sometimes)
+        rem Define Absolute Paths using Workspace
+        set "DEP_INSTALL=%GITHUB_WORKSPACE%\dep-install"
+        set "DEP_INSTALL_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
+        
+        rem Find exact location of MpvQtConfig.cmake
+        for /f "delims=" %%i in ('dir /s /b "%DEP_INSTALL%\MpvQtConfig.cmake"') do set MPVQT_CONFIG_PATH=%%~dpi
         if defined MPVQT_CONFIG_PATH set MPVQT_DIR=%MPVQT_CONFIG_PATH%
         
-        rem Find ECMConfig.cmake location
-        for /f "delims=" %%i in ('dir /s /b ..\dep-install\ECMConfig.cmake') do set ECM_CONFIG_PATH=%%~dpi
+        rem Find ECMConfig.cmake
+        for /f "delims=" %%i in ('dir /s /b "%DEP_INSTALL%\ECMConfig.cmake"') do set ECM_CONFIG_PATH=%%~dpi
         if defined ECM_CONFIG_PATH set ECM_DIR=%ECM_CONFIG_PATH%
         
         echo Found MpvQt DIR: %MPVQT_DIR%
@@ -183,7 +184,7 @@ jobs:
           -DCMAKE_CXX_COMPILER=cl ^
           -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
           -DCMAKE_INSTALL_PREFIX=output ^
-          -DCMAKE_PREFIX_PATH="%GITHUB_WORKSPACE%\dep-install;%Qt6_DIR%" ^
+          -DCMAKE_PREFIX_PATH="%DEP_INSTALL_FWD%;%Qt6_DIR%" ^
           -DMpvQt_DIR="%MPVQT_DIR%" ^
           -DECM_DIR="%ECM_DIR%" ^
           -DQTROOT="%Qt6_DIR%" ^
@@ -195,9 +196,9 @@ jobs:
         echo Deploying Qt...
         %Qt6_DIR%\bin\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
         
-        copy %GITHUB_WORKSPACE%\dep-install\bin\libssl-3-x64.dll output\
-        copy %GITHUB_WORKSPACE%\dep-install\bin\libcrypto-3-x64.dll output\
-        copy %GITHUB_WORKSPACE%\dep-install\bin\libmpv-2.dll output\
+        copy "%DEP_INSTALL%\bin\libssl-3-x64.dll" output\
+        copy "%DEP_INSTALL%\bin\libcrypto-3-x64.dll" output\
+        copy "%DEP_INSTALL%\bin\libmpv-2.dll" output\
         
         ninja windows_package
 
