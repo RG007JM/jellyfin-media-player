@@ -155,6 +155,8 @@ jobs:
         $libMpv = "$depInstall/lib/libmpv.lib"
         $incMpv = "$depInstall/include"
         $mpvQtDir = "$depInstall/lib/cmake/MpvQt"
+        # Using absolute path for install prefix to avoid ambiguity
+        $installPrefix = "$root/output"
 
         # --- OVERRIDE FindMPV.cmake ---
         $cmakeMod = "CMakeModules/FindMPV.cmake"
@@ -207,7 +209,7 @@ jobs:
         Set-Content $f $c
 
         # --- CMAKE & NINJA ---
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=output -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
         if ($LASTEXITCODE -ne 0) { exit 1 }
         
         Set-Location build
@@ -217,24 +219,26 @@ jobs:
     - name: Deploy Qt and Finalize Dependencies
       shell: pwsh
       run: |
-        $outDir = "build/output"
+        $outDir = "$((Get-Location).Path)\output"
+        Write-Host "Checking output directory: $outDir"
+        
         if (-not (Test-Path $outDir)) {
-            Write-Warning "Output directory '$outDir' not found! Checking 'build'..."
-            Get-ChildItem "build"
+            Write-Error "Output directory '$outDir' NOT FOUND. Installation failed?"
+            Get-ChildItem -Recurse | Select-Object FullName
             exit 1
         }
-        $target = "$outDir/Jellyfin Desktop.exe"
         
+        $target = "$outDir\Jellyfin Desktop.exe"
         if (-not (Test-Path $target)) {
-             Write-Error "Target Executable not found at $target"
+             Write-Error "Executable not found at $target"
              exit 1
         }
         
-        & "windeployqt" --release --qmldir src/ui --compiler-runtime --no-opengl-sw --xml "$target"
+        # Run windeployqt
+        & "windeployqt" --release --qmldir src\ui --compiler-runtime --no-opengl-sw --xml "$target"
         
-        # --- FIX: Hardcoded VC Redist Paths for GitHub Actions ---
+        # --- FIX: Hardcoded VC Redist Paths ---
         $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
-        # Find the latest version folder
         $latestVer = Get-ChildItem $vcRoot | Sort-Object Name -Descending | Select-Object -First 1
         $redistDir = "$($latestVer.FullName)\x64\Microsoft.VC143.CRT"
         
@@ -248,7 +252,6 @@ jobs:
                 Copy-Item -Force $src "$outDir\$dll"
                 Write-Host "Copied $dll"
             } else {
-                # Fallback search if standard path fails
                 $found = Get-ChildItem -Path $vcRoot -Filter $dll -Recurse | Select-Object -First 1
                 if ($found) {
                     Copy-Item -Force $found.FullName "$outDir\$dll"
@@ -256,6 +259,17 @@ jobs:
                 } else {
                     Write-Warning "Could not find $dll"
                 }
+            }
+        }
+        
+        # --- SAFETY: Force Copy Core Qt DLLs ---
+        $qtBin = "$env:Qt6_DIR\bin"
+        $qtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll")
+        
+        foreach ($qDll in $qtDlls) {
+            if (-not (Test-Path "$outDir\$qDll")) {
+                Write-Warning "$qDll was missing after windeployqt! Manually copying..."
+                Copy-Item -Force "$qtBin\$qDll" $outDir
             }
         }
         
@@ -268,6 +282,9 @@ jobs:
                 Write-Warning "Missing dependency: $src"
             }
         }
+        
+        Write-Host "--- Final Output Content ---"
+        Get-ChildItem $outDir | Select-Object Name
 
     - name: Build Installer Package
       shell: cmd
