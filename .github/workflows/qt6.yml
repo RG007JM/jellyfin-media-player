@@ -63,7 +63,7 @@ jobs:
         $defContent | Set-Content libmpv-2.def
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
         
-        # Copy headers and libs
+        # Correctly stage headers and libs
         Copy-Item -Recurse -Force include\* ..\dep-install\include\
         Copy-Item libmpv.lib ..\dep-install\lib\
         Copy-Item libmpv-2.dll ..\dep-install\bin\
@@ -85,9 +85,14 @@ jobs:
         if %errorlevel% neq 0 exit /b %errorlevel%
         cd ..
         
-        rem --- Build MpvQt (Use v1.0.0 Tag for Stability) ---
-        git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
+        rem --- Build MpvQt (Master Branch) ---
+        git clone https://github.com/KDE/mpvqt.git
         cd mpvqt
+        
+        rem PATCH: Fix MSVC C2027 (incomplete type deletion)
+        rem We use PowerShell to replace inline destructor with declaration and add definition to cpp
+        powershell -Command "(Get-Content src/mpvcontroller.h) -replace '~MpvController\(\) = default;', '~MpvController();' | Set-Content src/mpvcontroller.h"
+        powershell -Command "Add-Content src/mpvcontroller.cpp '`nMpvController::~MpvController() = default;'"
         
         cmake -B build -GNinja ^
           -DCMAKE_C_COMPILER=cl ^
@@ -101,9 +106,10 @@ jobs:
         ninja -C build install
         if %errorlevel% neq 0 exit /b %errorlevel%
         
-        rem Verify install
+        rem Verify install immediately
         if not exist "%INSTALL_DIR%\lib\cmake\MpvQt\MpvQtConfig.cmake" (
            echo ERROR: MpvQtConfig.cmake not found! Build likely failed silently.
+           dir /s "%INSTALL_DIR%"
            exit /b 1
         )
         cd ..
