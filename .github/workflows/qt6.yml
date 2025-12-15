@@ -253,8 +253,14 @@ jobs:
         Write-Host "Manually copying missing DLLs..."
         $outDir = "build\output"
         
-        # Qt DLLs that windeployqt might miss (Added Qt6ShaderTools!)
-        $qtDlls = @("Qt6Xml.dll", "Qt6Widgets.dll", "Qt6Gui.dll", "Qt6Core.dll", "Qt6Network.dll", "Qt6Concurrent.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6SerialPort.dll", "Qt6ShaderTools.dll", "Qt6OpenGL.dll")
+        # EXTENDED Qt DLL List: Force copy modules windeployqt missed
+        $qtDlls = @(
+            "Qt6Xml.dll", "Qt6Widgets.dll", "Qt6Gui.dll", "Qt6Core.dll", 
+            "Qt6Network.dll", "Qt6Concurrent.dll", "Qt6Quick.dll", "Qt6Qml.dll", 
+            "Qt6SerialPort.dll", "Qt6ShaderTools.dll", "Qt6OpenGL.dll",
+            "Qt6Multimedia.dll", "Qt6MultimediaQuick.dll", "Qt6MultimediaWidgets.dll",
+            "Qt6Core5Compat.dll", "Qt6Sql.dll", "Qt6PrintSupport.dll"
+        )
         foreach ($dll in $qtDlls) {
             $src = "$binDir\$dll"
             if (Test-Path $src) {
@@ -263,6 +269,36 @@ jobs:
             } else {
                 Write-Warning "Could not find $dll at $src"
             }
+        }
+        
+        # Copy Visual C++ Runtime DLLs (concrt140, msvcp140, vcruntime140 etc)
+        # We find them in the VS install dir or System32
+        Write-Host "Searching for VC++ Runtime DLLs..."
+        $vcRuntimeNames = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_codecvt_ids.dll", "concrt140.dll")
+        
+        # Attempt to find them in Visual Studio Redist folder first
+        $vsRedistDir = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC" -Recurse -Filter "vcruntime140.dll" | Select-Object -First 1 | Split-Path -Parent
+        if (-not $vsRedistDir) {
+             # Fallback to System32
+             $vsRedistDir = "C:\Windows\System32"
+        }
+        
+        Write-Host "Copying VC++ Runtimes from: $vsRedistDir"
+        foreach ($dll in $vcRuntimeNames) {
+             $src = "$vsRedistDir\$dll"
+             if (Test-Path $src) {
+                 Copy-Item -Force $src $outDir
+                 Write-Host "Copied $dll"
+             } else {
+                 # Try System32 as last resort if not found in VS dir
+                 $sysSrc = "C:\Windows\System32\$dll"
+                 if (Test-Path $sysSrc) {
+                     Copy-Item -Force $sysSrc $outDir
+                     Write-Host "Copied $dll from System32"
+                 } else {
+                     Write-Warning "Could not find $dll"
+                 }
+             }
         }
         
         # Copy all custom-built dependencies from dep-install
