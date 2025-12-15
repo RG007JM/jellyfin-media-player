@@ -158,9 +158,15 @@ jobs:
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
         
-        rem OPTIONAL: Remove Qt6::DBus from CMakeLists if it causes issues on Windows
-        powershell -Command "(Get-Content src/CMakeLists.txt) -replace 'Qt6::DBus', '' | Set-Content src/CMakeLists.txt"
+        rem --- PATCH: Remove Qt6::DBus and MPRIS from build ---
+        powershell -Command "(Get-Content src/CMakeLists.txt) -replace 'Qt6::DBus', '' -replace 'mpris/MprisComponent.cpp', '' -replace 'mpris/MprisComponent.h', '' | Set-Content src/CMakeLists.txt"
         
+        rem --- PATCH: Remove MprisComponent from ComponentManager ---
+        powershell -Command "(Get-Content src/core/ComponentManager.cpp) -replace '#include .mpris/MprisComponent.h.', '' -replace '.*MprisComponent.*', '' | Set-Content src/core/ComponentManager.cpp"
+        
+        rem --- PATCH: Add windows.h to CodecsComponent.cpp ---
+        powershell -Command "$c = Get-Content src/player/CodecsComponent.cpp -Raw; $c = '#include <windows.h>' + [Environment]::NewLine + $c; Set-Content src/player/CodecsComponent.cpp $c"
+
         cd build
         
         rem Define Absolute Paths
