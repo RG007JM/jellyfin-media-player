@@ -9,6 +9,7 @@ on:
 jobs:
   build-win64:
     runs-on: windows-latest
+    timeout-minutes: 60
 
     steps:
     - uses: actions/checkout@v4
@@ -22,14 +23,13 @@ jobs:
         arch: "win64_msvc2022_64"
         modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning qtshadertools qt5compat qtimageformats qtserialport"
 
-    - name: Setup Build Environment (Ninja, Dirs, Reuse)
+    - name: Setup Build Environment
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        mkdir dep-install
+        mkdir dep-install\bin
         mkdir dep-install\include
         mkdir dep-install\lib
-        mkdir dep-install\bin
         
         curl -L https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip -o ninja.zip
         tar -xf ninja.zip -C dep-install\bin
@@ -42,9 +42,8 @@ jobs:
       shell: pwsh
       run: |
         $url = "https://sdk.lunarg.com/sdk/download/1.3.296.0/windows/VulkanSDK-1.3.296.0-Installer.exe"
-        $out = "VulkanSDK.exe"
-        Invoke-WebRequest -Uri $url -OutFile $out -UserAgent "curl/7.88.1"
-        Start-Process -FilePath .\$out -ArgumentList "--root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install" -Wait
+        Invoke-WebRequest -Uri $url -OutFile "VulkanSDK.exe" -UserAgent "curl/7.88.1"
+        Start-Process -FilePath .\VulkanSDK.exe -ArgumentList "--root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install" -Wait
         
         if (Test-Path "C:\VulkanSDK\Bin") { $sdkRoot = "C:\VulkanSDK" } 
         else { $sdkRoot = Get-ChildItem "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName }
@@ -52,7 +51,7 @@ jobs:
         echo "VULKAN_SDK=$sdkRoot" >> $env:GITHUB_ENV
         echo "VK_SDK_PATH=$sdkRoot" >> $env:GITHUB_ENV
         echo "$sdkRoot\Bin" >> $env:GITHUB_PATH
-        Remove-Item $out
+        Remove-Item VulkanSDK.exe
 
     - name: Prepare Libmpv
       shell: pwsh
@@ -181,7 +180,9 @@ jobs:
         $qmlDir = "dep-install/lib/qml"
         if (-not (Test-Path $qmlDir)) { $qmlDir = "dep-install/qml" }
         Write-Host "Running windeployqt with QML: $qmlDir"
-        & "windeployqt" --release --force --qmldir src/ui --qmlimport "$qmlDir" --compiler-runtime --no-opengl-sw --xml "$outDir/Jellyfin Desktop.exe"
+        
+        # Use --verbose 2 to see why it skips things
+        & "windeployqt" --verbose 2 --release --force --qmldir src/ui --qmlimport "$qmlDir" --compiler-runtime --no-opengl-sw --xml "$outDir/Jellyfin Desktop.exe"
 
         # 3. FIX VCRUNTIME (Recursive)
         $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
