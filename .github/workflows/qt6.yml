@@ -116,7 +116,6 @@ jobs:
         
         Write-Host "Downloading OpenSSL from $sslUrl..."
         try {
-            # Direct CDN doesn't require special UA, but we'll use a standard one
             Invoke-WebRequest -Uri $sslUrl -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -MaximumRedirection 5
         } catch {
             Write-Error "Download failed: $_"
@@ -168,13 +167,19 @@ jobs:
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
         cd build
         
+        rem Use forward slashes for CMake paths to fix MpvQt detection issues
+        set "DEP_INSTALL=%GITHUB_WORKSPACE:\=/%/dep-install"
+        set "QT_ROOT=%Qt6_DIR:\=/%"
+        
         cmake -GNinja ^
           -DCMAKE_C_COMPILER=cl ^
           -DCMAKE_CXX_COMPILER=cl ^
           -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
           -DCMAKE_INSTALL_PREFIX=output ^
-          -DCMAKE_PREFIX_PATH="%GITHUB_WORKSPACE%\dep-install;%Qt6_DIR%" ^
-          -DQTROOT="%Qt6_DIR%" ^
+          -DCMAKE_PREFIX_PATH="%DEP_INSTALL%;%QT_ROOT%" ^
+          -DMpvQt_DIR="%DEP_INSTALL%/lib/cmake/MpvQt" ^
+          -DECM_DIR="%DEP_INSTALL%/share/ECM/cmake" ^
+          -DQTROOT="%QT_ROOT%" ^
           ..
         
         ninja
