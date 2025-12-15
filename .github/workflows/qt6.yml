@@ -219,67 +219,76 @@ jobs:
     - name: Deploy Qt and Finalize Dependencies
       shell: pwsh
       run: |
-        $outDir = "$((Get-Location).Path)\output"
-        Write-Host "Checking output directory: $outDir"
+        $outDir = "$((Get-Location).Path)/output"
+        $depInstall = "$((Get-Location).Path)/dep-install"
+        $qtBin = "$env:Qt6_DIR/bin"
         
-        if (-not (Test-Path $outDir)) {
-            Write-Error "Output directory '$outDir' NOT FOUND. Installation failed?"
-            Get-ChildItem -Recurse | Select-Object FullName
-            exit 1
+        Write-Host "Deploying to: $outDir"
+        
+        if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
+        
+        # --- FIX: Pass MpvQt QML Import Path ---
+        # windeployqt needs to know where external QML modules live
+        $exePath = "$outDir/Jellyfin Desktop.exe"
+        $mpvQmlPath = "$depInstall/lib/qml"
+        
+        if (-not (Test-Path $mpvQmlPath)) {
+             Write-Warning "MpvQt QML path not found at $mpvQmlPath. Checking alternative..."
+             if (Test-Path "$depInstall/qml") { $mpvQmlPath = "$depInstall/qml" }
         }
         
-        $target = "$outDir\Jellyfin Desktop.exe"
-        if (-not (Test-Path $target)) {
-             Write-Error "Executable not found at $target"
-             exit 1
-        }
+        Write-Host "Running windeployqt with QML import: $mpvQmlPath"
         
-        # Run windeployqt
-        & "windeployqt" --release --qmldir src\ui --compiler-runtime --no-opengl-sw --xml "$target"
-        
-        # --- FIX: Hardcoded VC Redist Paths ---
+        & "windeployqt" --release --force `
+            --qmldir src/ui `
+            --qmlimport "$mpvQmlPath" `
+            --compiler-runtime `
+            --no-opengl-sw `
+            --xml "$exePath"
+            
+        # --- FIX: Robust VC Redist Copy (Prevent ARM64 Mismatch) ---
+        Write-Host "Locating correct x64 VC Redist..."
         $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
-        $latestVer = Get-ChildItem $vcRoot | Sort-Object Name -Descending | Select-Object -First 1
-        $redistDir = "$($latestVer.FullName)\x64\Microsoft.VC143.CRT"
         
-        Write-Host "Using VC Redist Dir: $redistDir"
+        # Filter strictly for x64 directory names
+        $latestVer = Get-ChildItem $vcRoot | Sort-Object Name -Descending | Select-Object -First 1
+        $redistDir = Get-ChildItem -Path "$($latestVer.FullName)" -Directory | Where-Object { $_.Name -match "x64" } | Select-Object -First 1 -ExpandProperty FullName
+        
+        if (-not $redistDir) { throw "Could not locate x64 VC Redist directory!" }
+        Write-Host "Source Redist Dir: $redistDir"
         
         $dlls = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll")
-        
         foreach ($dll in $dlls) {
-            $src = "$redistDir\$dll"
-            if (Test-Path $src) {
-                Copy-Item -Force $src "$outDir\$dll"
-                Write-Host "Copied $dll"
+            Copy-Item -Force "$redistDir\$dll" "$outDir\"
+            Write-Host "Copied $dll"
+        }
+
+        # --- Manual Dependency Safety Net (Core Deps) ---
+        $thirdPartyDeps = @(
+            @{ Name="libssl-3-x64.dll"; Path="$depInstall/bin/libssl-3-x64.dll" },
+            @{ Name="libcrypto-3-x64.dll"; Path="$depInstall/bin/libcrypto-3-x64.dll" },
+            @{ Name="libmpv-2.dll"; Path="$depInstall/bin/libmpv-2.dll" },
+            @{ Name="SDL2.dll"; Path="$depInstall/bin/SDL2.dll" },
+            @{ Name="MpvQt.dll"; Path="$depInstall/bin/MpvQt.dll" }
+        )
+
+        foreach ($dep in $thirdPartyDeps) {
+            if (Test-Path $dep.Path) {
+                Copy-Item -Force $dep.Path $outDir
+                Write-Host "Deployed $($dep.Name)"
             } else {
-                $found = Get-ChildItem -Path $vcRoot -Filter $dll -Recurse | Select-Object -First 1
-                if ($found) {
-                    Copy-Item -Force $found.FullName "$outDir\$dll"
-                    Write-Host "Found and copied $dll from $($found.FullName)"
-                } else {
-                    Write-Warning "Could not find $dll"
-                }
+                Write-Error "CRITICAL: Missing dependency $($dep.Name) at $($dep.Path)"
+                exit 1
             }
         }
+
+        # --- QT Safety Copy (Forcing known flakiness) ---
+        $criticalQtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll")
         
-        # --- SAFETY: Force Copy Core Qt DLLs ---
-        $qtBin = "$env:Qt6_DIR\bin"
-        $qtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll")
-        
-        foreach ($qDll in $qtDlls) {
+        foreach ($qDll in $criticalQtDlls) {
             if (-not (Test-Path "$outDir\$qDll")) {
-                Write-Warning "$qDll was missing after windeployqt! Manually copying..."
+                Write-Warning "Windeployqt missed $qDll. Force copying..."
                 Copy-Item -Force "$qtBin\$qDll" $outDir
-            }
-        }
-        
-        # --- Copy Other Deps ---
-        "libssl-3-x64.dll", "libcrypto-3-x64.dll", "libmpv-2.dll", "SDL2.dll", "MpvQt.dll" | ForEach-Object {
-            $src = "dep-install\bin\$_"
-            if (Test-Path $src) {
-                Copy-Item -Force $src $outDir
-            } else {
-                Write-Warning "Missing dependency: $src"
             }
         }
         
