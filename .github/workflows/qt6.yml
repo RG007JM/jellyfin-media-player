@@ -89,11 +89,17 @@ jobs:
         git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
         cd mpvqt
         
-        rem PATCH: Fix MSVC C2027 (incomplete type deletion)
-        rem 1. Replace any existing destructor in header with a clean declaration
-        powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*~MpvController\(\).*?;', '    ~MpvController();'; Set-Content src/mpvcontroller.h $c"
+        rem DEBUG: Print header file content to verify structure
+        type src\mpvcontroller.h
         
-        rem 2. Append definition to source file
+        rem PATCH: Fix MSVC C2027 (incomplete type deletion)
+        rem 1. Remove ANY existing destructor line
+        powershell -Command "(Get-Content src/mpvcontroller.h) -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', '' | Set-Content src/mpvcontroller.h"
+        
+        rem 2. Insert clean destructor declaration after constructor
+        powershell -Command "(Get-Content src/mpvcontroller.h) -replace 'explicit MpvController\(QObject \*parent = nullptr\);', 'explicit MpvController(QObject *parent = nullptr);`n    virtual ~MpvController();' | Set-Content src/mpvcontroller.h"
+        
+        rem 3. Append definition to source file
         echo. >> src\mpvcontroller.cpp
         echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
         
