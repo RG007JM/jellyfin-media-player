@@ -43,21 +43,31 @@ jobs:
     - name: Install Vulkan SDK
       shell: pwsh
       run: |
-        # Installing Vulkan SDK to enable WrapVulkanHeaders and Vulkan support
-        choco install vulkan-sdk -y --no-progress
+        # Manually download and install Vulkan SDK to avoid broken Chocolatey package
+        $url = "https://sdk.lunarg.com/sdk/download/1.3.296.0/windows/VulkanSDK-1.3.296.0-Installer.exe"
+        $out = "VulkanSDK.exe"
         
-        # Locate SDK and set Environment Variables for CMake
-        $vulkanRoot = "C:\VulkanSDK"
-        if (Test-Path $vulkanRoot) {
-            $latestSdk = Get-ChildItem $vulkanRoot | Sort-Object Name -Descending | Select-Object -First 1
-            if ($latestSdk) {
-                Write-Host "Found Vulkan SDK at $($latestSdk.FullName)"
-                echo "VULKAN_SDK=$($latestSdk.FullName)" >> $env:GITHUB_ENV
-                echo "VK_SDK_PATH=$($latestSdk.FullName)" >> $env:GITHUB_ENV
-                echo "$($latestSdk.FullName)\Bin" >> $env:GITHUB_PATH
-                echo "$($latestSdk.FullName)\Include" >> $env:GITHUB_PATH
-            }
+        Write-Host "Downloading Vulkan SDK..."
+        Invoke-WebRequest -Uri $url -OutFile $out -UserAgent "curl/7.88.1"
+        
+        Write-Host "Installing Vulkan SDK..."
+        Start-Process -FilePath .\$out -ArgumentList "--root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install" -Wait
+        
+        # Locate SDK and set Environment Variables
+        if (Test-Path "C:\VulkanSDK\Bin") {
+            $sdkRoot = "C:\VulkanSDK"
+        } else {
+            # Fallback if it created a versioned subdir
+            $sdkRoot = Get-ChildItem "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
         }
+        
+        Write-Host "Vulkan SDK installed at: $sdkRoot"
+        echo "VULKAN_SDK=$sdkRoot" >> $env:GITHUB_ENV
+        echo "VK_SDK_PATH=$sdkRoot" >> $env:GITHUB_ENV
+        echo "$sdkRoot\Bin" >> $env:GITHUB_PATH
+        echo "$sdkRoot\Include" >> $env:GITHUB_PATH
+        
+        Remove-Item $out
 
     - name: Prepare Libmpv
       shell: pwsh
@@ -90,7 +100,6 @@ jobs:
     - name: Prepare SDL2
       shell: pwsh
       run: |
-        # Download SDL2 for Gamepad support
         $url = "https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip"
         Invoke-WebRequest -Uri $url -OutFile "sdl2.zip"
         Expand-Archive -Path "sdl2.zip" -DestinationPath "sdl2-temp" -Force
@@ -193,13 +202,14 @@ jobs:
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
         
-        rem --- PATCH: Remove MprisComponent from CMakeLists (robust filtering) ---
+        rem --- PATCH: Remove MprisComponent references completely ---
         powershell -Command "Get-Content src/CMakeLists.txt | Where-Object { $_ -notmatch 'mpris/MprisComponent' } | Set-Content src/CMakeLists.txt"
+        powershell -Command "Get-Content src/core/ComponentManager.cpp | Where-Object { $_ -notmatch 'MprisComponent' } | Set-Content src/core/ComponentManager.cpp"
         
-        rem --- PATCH: Remove MprisComponent from ComponentManager ---
-        powershell -Command "(Get-Content src/core/ComponentManager.cpp) -replace '#include .mpris/MprisComponent.h.', '' -replace 'registerComponent.MprisComponent..;', '' | Set-Content src/core/ComponentManager.cpp"
+        rem --- DELETE: Mpris Source Directory (Ensure it's gone) ---
+        rmdir /s /q src\mpris
         
-        rem --- PATCH: Remove Qt6::DBus ---
+        rem --- PATCH: Remove Qt6::DBus dependency ---
         powershell -Command "(Get-Content src/CMakeLists.txt) -replace 'Qt6::DBus', '' | Set-Content src/CMakeLists.txt"
         
         rem --- PATCH: Add windows.h to CodecsComponent.cpp ---
