@@ -25,7 +25,6 @@ jobs:
     - name: Setup Build Environment
       shell: pwsh
       run: |
-        # Setup Visual Studio Environment variables in PowerShell
         $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         cmd.exe /c "call `"$vsPath`" && set > %TEMP%\vcvars.txt"
         Get-Content "$env:TEMP\vcvars.txt" | Foreach-Object {
@@ -34,15 +33,12 @@ jobs:
           }
         }
         
-        # Create directories
         New-Item -ItemType Directory -Force -Path dep-install\bin, dep-install\include, dep-install\lib
         
-        # Install Ninja
         Invoke-WebRequest -Uri "https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip" -OutFile ninja.zip
         tar -xf ninja.zip -C dep-install\bin
         Remove-Item ninja.zip
         
-        # Add to PATH
         echo "$((Get-Location).Path)\dep-install\bin" >> $env:GITHUB_PATH
         pip install reuse
 
@@ -68,11 +64,9 @@ jobs:
         Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
         
         if ((Get-Item mpv.7z).Length -lt 1000) { throw "Download failed (file too small)" }
-        
         7z x mpv.7z -ompv
         Set-Location mpv
         
-        # Generate lib file
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /exports libmpv-2.dll > exports.txt"
         $defContent = @("LIBRARY libmpv-2.dll", "EXPORTS") + (Get-Content exports.txt | ForEach-Object { if ($_ -match "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)") { $matches[1] } })
         $defContent | Set-Content libmpv-2.def
@@ -99,6 +93,8 @@ jobs:
     - name: Build Extra CMake Modules
       shell: pwsh
       run: |
+        $env:CC="cl"
+        $env:CXX="cl"
         $installDir = "$((Get-Location).Path)\dep-install"
         git clone https://github.com/KDE/extra-cmake-modules.git
         
@@ -108,24 +104,22 @@ jobs:
     - name: Build MpvQt
       shell: pwsh
       run: |
+        $env:CC="cl"
+        $env:CXX="cl"
         $root = (Get-Location).Path
         $installDir = "$root/dep-install"
-        # Convert backslashes to forward slashes for CMake
         $installDirFwd = $installDir.Replace('\', '/')
         
         git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
         Set-Location mpvqt
         
-        # Patch MpvQt
         $c = Get-Content src/mpvcontroller.h -Raw
         $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''
         $nl = [Environment]::NewLine
         $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();')
         Set-Content src/mpvcontroller.h $c
-        
         Add-Content src/mpvcontroller.cpp "`nMpvController::~MpvController() = default;"
         
-        # Build
         cmake -B build -GNinja `
             -DCMAKE_INSTALL_PREFIX="$installDir" `
             -DCMAKE_PREFIX_PATH="$installDir;$env:Qt6_DIR" `
@@ -162,6 +156,8 @@ jobs:
     - name: Configure and Build Jellyfin Desktop
       shell: pwsh
       run: |
+        $env:CC="cl"
+        $env:CXX="cl"
         $root = (Get-Location).Path.Replace("\", "/")
         $dep = "$root/dep-install"
         $libMpv = "$dep/lib/libmpv.lib"
@@ -188,14 +184,14 @@ jobs:
         Set-Content $f ("#include <windows.h>`n" + (Get-Content $f -Raw))
 
         # Build
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$dep;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja -C build"
+        cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$dep;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" .
+        ninja -C build
 
     - name: Install and Fix Deployment
       shell: pwsh
       run: |
-        # 1. RUN INSTALL (Populate output directory)
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja -C build install"
+        # 1. RUN INSTALL
+        ninja -C build install
         
         $outDir = "$((Get-Location).Path)/output"
         $depBin = "dep-install/bin"
