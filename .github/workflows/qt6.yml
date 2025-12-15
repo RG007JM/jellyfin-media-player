@@ -1,4 +1,4 @@
-name: Build Qt6 Windows x64
+name: build
 
 on:
   workflow_dispatch:
@@ -21,11 +21,10 @@ jobs:
       uses: jurplel/install-qt-action@v4
       with:
         version: "6.8.0"
-        # FIXED: Changed from win64_msvc2019_64 to win64_msvc2022_64
         arch: "win64_msvc2022_64"
         modules: "qtwebengine"
 
-    - name: Setup Build Environment (Ninja, Dirs)
+    - name: Setup Build Environment
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
@@ -43,36 +42,55 @@ jobs:
         rem Add dep-install\bin to PATH
         echo %GITHUB_WORKSPACE%\dep-install\bin>> %GITHUB_PATH%
 
-    - name: Prepare Dependencies (Libmpv, ECM, MpvQt)
+    - name: Prepare Libmpv
+      shell: pwsh
+      run: |
+        # Download Libmpv
+        Invoke-WebRequest -Uri "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20251116-git-701201b.7z/download" -OutFile "mpv.7z"
+        7z x mpv.7z -ompv
+        
+        Set-Location mpv
+        
+        # Create .def file from DLL using dumpbin (since we don't have gendef)
+        # We need the VS environment variables for dumpbin
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /exports libmpv-2.dll > exports.txt"
+        
+        $defContent = @("LIBRARY libmpv-2.dll", "EXPORTS")
+        # Parse dumpbin output to get function names
+        # Format is usually:  ordinal hint RVA      name
+        # We want just the name
+        $lines = Get-Content exports.txt
+        foreach ($line in $lines) {
+            if ($line -match "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)") {
+                $defContent += $matches[1]
+            }
+        }
+        $defContent | Set-Content libmpv-2.def
+        
+        # Create .lib from .def
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
+        
+        # Install to dep-install
+        Copy-Item -Recurse include/* ../dep-install/include/
+        Copy-Item libmpv.lib ../dep-install/lib/
+        Copy-Item libmpv-2.dll ../dep-install/bin/
+        
+        Set-Location ..
+
+    - name: Prepare ECM and MpvQt
       shell: bash
       run: |
         set -e
-        # 1. Libmpv (Dev) - Using your version
-        curl -L "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20251116-git-701201b.7z/download" -o mpv.7z
-        7z x mpv.7z -ompv
-        
-        # Prepare Libmpv for MSVC
-        cd mpv
-        ./gendef.exe libmpv-2.dll
-        dlltool -d libmpv-2.def -l libmpv.lib -D libmpv-2.dll
-        
-        # Install Libmpv to dep-install prefix
-        cp -r include/* ../dep-install/include/
-        cp libmpv.lib ../dep-install/lib/
-        cp libmpv-2.dll ../dep-install/bin/
-        cd ..
-        
-        # 2. Extra CMake Modules (ECM) - Required by MpvQt
+        # ECM
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
         cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX=../dep-install
         ninja -C build install
         cd ..
         
-        # 3. MpvQt - Build and install manually
+        # MpvQt
         git clone https://github.com/KDE/mpvqt.git
         cd mpvqt
-        # Qt6_DIR is provided by install-qt-action
         cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX=../dep-install -DCMAKE_PREFIX_PATH="$PWD/../dep-install;$Qt6_DIR"
         ninja -C build install
         cd ..
@@ -82,11 +100,9 @@ jobs:
       run: |
         mkdir -p bundle/win
         
-        # VC++ Redist
         curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
         cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
         
-        # OpenSSL 3.3.0 (Win64) - Required for Qt 6.8 Network
         curl -L https://mirror.firedaemon.com/openssl/openssl-3.3.0-dev-1-ga91d575-windows-x64.zip -o openssl.zip
         unzip -o openssl.zip -d openssl-temp
         cp openssl-temp/x64/bin/libssl-3-x64.dll dep-install/bin/
@@ -123,7 +139,6 @@ jobs:
         ninja
         ninja install
         
-        echo Deploying Qt...
         %Qt6_DIR%\bin\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
         
         copy %GITHUB_WORKSPACE%\dep-install\bin\libssl-3-x64.dll output\
