@@ -236,24 +236,24 @@ jobs:
       shell: pwsh
       run: |
         $target = "build\output\Jellyfin Desktop.exe"
+        $outDir = "build\output"
         
-        # Try to find windeployqt in PATH
+        # 1. Run windeployqt with --compiler-runtime to grab MSVC DLLs cleanly
         $deployTool = Get-Command "windeployqt" -ErrorAction SilentlyContinue
         
         if ($deployTool) {
              Write-Host "Found windeployqt at $($deployTool.Source)"
-             & $deployTool.Source --release --qmldir src\ui --xml $target
+             # Added --compiler-runtime and --no-opengl-sw
+             & $deployTool.Source --release --qmldir src\ui --compiler-runtime --no-opengl-sw --xml $target
              
-             # Determine Qt Bin Dir from windeployqt location
              $binDir = Split-Path -Parent $deployTool.Source
         } else {
-             Write-Error "windeployqt.exe not found in PATH."
+             Write-Error "windeployqt.exe not found."
         }
         
-        Write-Host "Manually copying missing DLLs..."
-        $outDir = "build\output"
+        Write-Host "Manually copying extra dependencies..."
         
-        # EXTENDED Qt DLL List: Force copy modules windeployqt missed
+        # 2. Force Copy Qt Modules (Safety Net)
         $qtDlls = @(
             "Qt6Xml.dll", "Qt6Widgets.dll", "Qt6Gui.dll", "Qt6Core.dll", 
             "Qt6Network.dll", "Qt6Concurrent.dll", "Qt6Quick.dll", "Qt6Qml.dll", 
@@ -265,71 +265,49 @@ jobs:
             $src = "$binDir\$dll"
             if (Test-Path $src) {
                 Copy-Item -Force $src $outDir
-                Write-Host "Copied $dll"
-            } else {
-                Write-Warning "Could not find $dll at $src"
             }
         }
         
-        # Copy Visual C++ Runtime DLLs (concrt140, msvcp140, vcruntime140 etc)
-        # We find them in the VS install dir or System32
-        Write-Host "Searching for VC++ Runtime DLLs..."
-        $vcRuntimeNames = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_codecvt_ids.dll", "concrt140.dll")
+        # 3. Explicit VC Runtime Check (Fix for missing underscores)
+        # We manually verify if the required runtimes are present with correct names
+        $requiredRuntimes = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll")
         
-        # Attempt to find them in Visual Studio Redist folder first
+        # Find source dir
         $vsRedistDir = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC" -Recurse -Filter "vcruntime140.dll" | Select-Object -First 1 | Split-Path -Parent
-        if (-not $vsRedistDir) {
-             # Fallback to System32
-             $vsRedistDir = "C:\Windows\System32"
+        if (-not $vsRedistDir) { $vsRedistDir = "C:\Windows\System32" }
+        
+        foreach ($dll in $requiredRuntimes) {
+            $src = "$vsRedistDir\$dll"
+            $dest = "$outDir\$dll"
+            
+            if (Test-Path $src) {
+                Copy-Item -Force $src $dest
+                Write-Host "Copied $dll (Verified)"
+            } else {
+                # Fallback: check if underscore version exists without underscore in source (unlikely but safe)
+                $altName = $dll.Replace("_", "")
+                $altSrc = "$vsRedistDir\$altName"
+                if (Test-Path $altSrc) {
+                     Copy-Item -Force $altSrc $dest
+                     Write-Host "Copied $altName as $dll (Renamed fix)"
+                } else {
+                     Write-Warning "Critical: Could not find runtime $dll"
+                }
+            }
         }
         
-        Write-Host "Copying VC++ Runtimes from: $vsRedistDir"
-        foreach ($dll in $vcRuntimeNames) {
-             $src = "$vsRedistDir\$dll"
-             if (Test-Path $src) {
-                 Copy-Item -Force $src $outDir
-                 Write-Host "Copied $dll"
-             } else {
-                 # Try System32 as last resort if not found in VS dir
-                 $sysSrc = "C:\Windows\System32\$dll"
-                 if (Test-Path $sysSrc) {
-                     Copy-Item -Force $sysSrc $outDir
-                     Write-Host "Copied $dll from System32"
-                 } else {
-                     Write-Warning "Could not find $dll"
-                 }
-             }
-        }
-        
-        # Copy all custom-built dependencies from dep-install
-        $depDlls = @(
-            "libssl-3-x64.dll",
-            "libcrypto-3-x64.dll", 
-            "libmpv-2.dll",
-            "SDL2.dll",
-            "MpvQt.dll"
-        )
-        
+        # 4. Copy External Libs
+        $depDlls = @("libssl-3-x64.dll", "libcrypto-3-x64.dll", "libmpv-2.dll", "SDL2.dll", "MpvQt.dll")
         foreach ($dll in $depDlls) {
             $src = "dep-install\bin\$dll"
-            if (Test-Path $src) {
-                Copy-Item -Force $src $outDir
-                Write-Host "Copied $dll"
-            } else {
-                Write-Warning "Could not find $dll in dep-install\bin!"
-            }
+            if (Test-Path $src) { Copy-Item -Force $src $outDir }
         }
         
-        # CLEANUP: Remove massive PDB files
-        Write-Host "Cleaning up .pdb files..."
-        Get-ChildItem -Path $outDir -Filter "*.pdb" -Recurse | Remove-Item -Force -Verbose
-
-        # Verify final size
-        $size = (Get-ChildItem $outDir -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
-        Write-Host "Final App Directory Size: $size MB"
+        # CLEANUP
+        Get-ChildItem -Path $outDir -Filter "*.pdb" -Recurse | Remove-Item -Force
         
-        # Verify final DLL list
-        Write-Host "`nFinal DLL list in output folder:"
+        # Final Verification
+        Write-Host "`nFinal DLL Check:"
         Get-ChildItem -Path $outDir -Filter *.dll | Select-Object Name
 
     - name: Build Installer Package
