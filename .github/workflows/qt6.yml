@@ -253,8 +253,8 @@ jobs:
         Write-Host "Manually copying missing DLLs..."
         $outDir = "build\output"
         
-        # Qt DLLs that windeployqt might miss (Added Qt6Quick and Qt6Qml explicitly)
-        $qtDlls = @("Qt6Xml.dll", "Qt6Widgets.dll", "Qt6Gui.dll", "Qt6Core.dll", "Qt6Network.dll", "Qt6Concurrent.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6SerialPort.dll")
+        # Qt DLLs that windeployqt might miss (Added Qt6ShaderTools!)
+        $qtDlls = @("Qt6Xml.dll", "Qt6Widgets.dll", "Qt6Gui.dll", "Qt6Core.dll", "Qt6Network.dll", "Qt6Concurrent.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6SerialPort.dll", "Qt6ShaderTools.dll", "Qt6OpenGL.dll")
         foreach ($dll in $qtDlls) {
             $src = "$binDir\$dll"
             if (Test-Path $src) {
