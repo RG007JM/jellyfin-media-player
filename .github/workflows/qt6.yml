@@ -85,15 +85,15 @@ jobs:
         if %errorlevel% neq 0 exit /b %errorlevel%
         cd ..
         
-        rem --- Build MpvQt (Master Branch) ---
-        git clone https://github.com/KDE/mpvqt.git
+        rem --- Build MpvQt (v1.0.0) ---
+        git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
         cd mpvqt
         
         rem PATCH: Fix MSVC C2027 (incomplete type deletion)
-        rem Clean PowerShell patch to avoid syntax errors
-        powershell -Command "(Get-Content src/mpvcontroller.h) -replace '~MpvController\(\) = default;', '~MpvController();' | Set-Content src/mpvcontroller.h"
+        rem 1. Replace any existing destructor in header with a clean declaration
+        powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*~MpvController\(\).*?;', '    ~MpvController();'; Set-Content src/mpvcontroller.h $c"
         
-        rem Append to cpp file safely
+        rem 2. Append definition to source file
         echo. >> src\mpvcontroller.cpp
         echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
         
