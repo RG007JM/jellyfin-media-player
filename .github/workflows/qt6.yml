@@ -173,16 +173,20 @@ jobs:
 
         set "DEP_INSTALL=%GITHUB_WORKSPACE%\dep-install"
         set "DEP_INSTALL_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
+        set "MPV_LIB_FWD=%GITHUB_WORKSPACE:\=/%/dep-install/lib/libmpv.lib"
+        set "MPV_INC_FWD=%GITHUB_WORKSPACE:\=/%/dep-install/include"
         
         for /f "delims=" %%i in ('dir /s /b "%DEP_INSTALL%\MpvQtConfig.cmake"') do set MPVQT_CONFIG_PATH=%%~dpi
         if defined MPVQT_CONFIG_PATH set MPVQT_DIR=%MPVQT_CONFIG_PATH%
         
-        rem --- FIXED: Explicit Source and Build Directories ---
+        rem --- FIXED: Pass MPV_LIBRARY and MPV_INCLUDE_DIR Explicitly ---
         cmake -B build -GNinja ^
           -DCMAKE_BUILD_TYPE=Release ^
           -DCMAKE_INSTALL_PREFIX=output ^
           -DCMAKE_PREFIX_PATH="%DEP_INSTALL_FWD%;%Qt6_DIR%" ^
           -DMpvQt_DIR="%MPVQT_DIR%" ^
+          -DMPV_LIBRARY="%MPV_LIB_FWD%" ^
+          -DMPV_INCLUDE_DIR="%MPV_INC_FWD%" ^
           .
         
         cd build
