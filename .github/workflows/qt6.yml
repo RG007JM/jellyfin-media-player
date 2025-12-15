@@ -150,15 +150,6 @@ jobs:
     - name: Build Jellyfin Desktop
       shell: pwsh
       run: |
-        # --- Environment Setup (manually, since we are in pwsh) ---
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && set > %TEMP%\vcvars.txt"
-        Get-Content "$env:TEMP\vcvars.txt" | ForEach-Object {
-          if ($_ -match "^(.*?)=(.*)$") {
-            Set-Content "env:$($matches[1])" $matches[2]
-          }
-        }
-        $env:PATH += ";C:\Program Files (x86)\WiX Toolset v3.11\bin"
-
         # --- PATH NORMALIZATION ---
         $root = (Get-Location).Path.Replace("\", "/")
         $depInstall = "$root/dep-install"
@@ -170,10 +161,117 @@ jobs:
         Write-Host "ROOT: $root"
         Write-Host "MPV LIB: $libMpv"
         Write-Host "MPV INC: $incMpv"
-        Write-Host "MPVQT: $mpvQtDir"
         
-        if (-not (Test-Path $libMpv)) { Write-Error "FATAL: libmpv.lib NOT FOUND at $libMpv"; exit 1 }
+        # --- OVERRIDE FindMPV.cmake ---
+        # This forces CMake to accept our paths without searching
+        $cmakeMod = "CMakeModules/FindMPV.cmake"
+        $overrideContent = @"
+        set(MPV_FOUND TRUE)
+        set(MPV_INCLUDE_DIR "$incMpv")
+        set(MPV_LIBRARY "$libMpv")
+        set(MPV_LIBRARIES "$libMpv")
+        set(MPV_INCLUDE_DIRS "$incMpv")
+        if(NOT TARGET MPV::MPV)
+          add_library(MPV::MPV UNKNOWN IMPORTED)
+          set_target_properties(MPV::MPV PROPERTIES
+            IMPORTED_LOCATION "$libMpv"
+            INTERFACE_INCLUDE_DIRECTORIES "$incMpv"
+          )
+        endif()
+        "@
+        Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
+        Write-Host "Overwrote FindMPV.cmake with hardcoded paths."
 
-        # --- PATCH 1: Remove MprisComponent ---
-        $f='src/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'mpris/MprisComponent' -and $_ -notmatch 'add_subdirectory.mpris.' -and $_ -notmatch 'Qt6::DBus' } | Set-Content $f
-        $f='src/core/ComponentManager.cpp'; $c=Get-Content $f; $c | Where
+        # --- PATCHES (Simplified Syntax) ---
+        # Removing MprisComponent
+        $f='src/CMakeLists.txt'
+        (Get-Content $f) | Where-Object { 
+            $_ -notmatch 'mpris/MprisComponent' -and 
+            $_ -notmatch 'add_subdirectory.mpris.' -and 
+            $_ -notmatch 'Qt6::DBus' 
+        } | Set-Content $f
+
+        $f='src/core/ComponentManager.cpp'
+        (Get-Content $f) | Where-Object { $_ -notmatch 'MprisComponent' } | Set-Content $f
+        if (Test-Path src\mpris) { Remove-Item -Recurse -Force src\mpris }
+        
+        # Removing TaskbarComponent
+        $f='src/CMakeLists.txt'
+        (Get-Content $f) | Where-Object { $_ -notmatch 'taskbar' -and $_ -notmatch 'TaskbarComponent' } | Set-Content $f
+        
+        $f='src/core/ComponentManager.cpp'
+        (Get-Content $f) | Where-Object { $_ -notmatch 'TaskbarComponent' } | Set-Content $f
+        
+        $f='src/ui/WindowManager.cpp'
+        (Get-Content $f) | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'm_taskbar' } | Set-Content $f
+        if (Test-Path src\taskbar) { Remove-Item -Recurse -Force src\taskbar }
+
+        # Tests and Codecs
+        if (Test-Path tests/CMakeLists.txt) { 
+            $f='tests/CMakeLists.txt'
+            (Get-Content $f) | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'MprisComponent' } | Set-Content $f
+        }
+        
+        $f='src/player/CodecsComponent.cpp'
+        $c=Get-Content $f -Raw
+        $c='#include <windows.h>' + [Environment]::NewLine + $c
+        Set-Content $f $c
+
+        # --- CMAKE CONFIGURE ---
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=output -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
+        
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+        
+        Set-Location build
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja"
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
+
+    - name: Deploy Qt and Finalize Dependencies
+      shell: pwsh
+      run: |
+        $outDir = "build\output"
+        $target = "$outDir\Jellyfin Desktop.exe"
+        
+        & "windeployqt" --release --qmldir src\ui --compiler-runtime --no-opengl-sw --xml $target
+        
+        $searchRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
+        $vsRedistDir = (Get-ChildItem $searchRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.DirectoryName -match "x64" } | Select-Object -First 1).DirectoryName
+        
+        $runtimeMap = @{
+            "vcruntime140_1.dll" = @("vcruntime140_1.dll", "vcruntime1401.dll");
+            "msvcp140_1.dll"     = @("msvcp140_1.dll", "msvcp1401.dll");
+            "msvcp140_2.dll"     = @("msvcp140_2.dll", "msvcp1402.dll");
+            "vcruntime140.dll"   = @("vcruntime140.dll");
+            "msvcp140.dll"       = @("msvcp140.dll")
+        }
+        
+        foreach ($correctName in $runtimeMap.Keys) {
+            $candidates = $runtimeMap[$correctName]
+            $found = $false
+            foreach ($cand in $candidates) {
+                $srcPath = "$vsRedistDir\$cand"
+                if (Test-Path $srcPath) {
+                    Copy-Item -Force $srcPath "$outDir\$correctName"
+                    $found = $true
+                    break
+                }
+            }
+        }
+        
+        "libssl-3-x64.dll", "libcrypto-3-x64.dll", "libmpv-2.dll", "SDL2.dll", "MpvQt.dll" | ForEach-Object {
+            Copy-Item -Force "dep-install\bin\$_" $outDir
+        }
+
+    - name: Build Installer Package
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
+        cd build
+        ninja windows_package
+
+    - name: Archive installer
+      uses: actions/upload-artifact@v4
+      with:
+        name: jellyfin-desktop-windows
+        path: ${{ github.workspace }}/build/JellyfinDesktop-*.exe
