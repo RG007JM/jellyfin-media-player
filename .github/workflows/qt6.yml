@@ -44,6 +44,7 @@ jobs:
       shell: pwsh
       run: |
         $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20251214-git-f7be2ee.7z"
+        # SourceForge requires a 'curl' or 'wget' UA to return a redirect instead of HTML
         Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
         
         if ((Get-Item "mpv.7z").Length -lt 1000000) { throw "Download failed: mpv.7z is too small" }
@@ -111,13 +112,14 @@ jobs:
         Copy-Item "vc_redist.x64.exe" "bundle/win/vcredist_x64.exe"
         
         # OpenSSL 3.3.0 (Win64) - FireDaemon Mirror
-        # Using a browser-like UserAgent to avoid 403/HTML responses
+        # Using the Browser User-Agent that was verified to work in local testing
         $sslUrl = "https://mirror.firedaemon.com/openssl/openssl-3.3.0-dev-1-ga91d575-windows-x64.zip"
         $zipPath = "openssl.zip"
+        $validUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         
         Write-Host "Downloading OpenSSL from $sslUrl..."
         try {
-            Invoke-WebRequest -Uri $sslUrl -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -MaximumRedirection 5
+            Invoke-WebRequest -Uri $sslUrl -OutFile $zipPath -UserAgent $validUA -MaximumRedirection 5
         } catch {
             Write-Error "Download failed: $_"
             exit 1
@@ -147,7 +149,6 @@ jobs:
         
         Remove-Item -Recurse -Force "openssl-temp"
         Remove-Item -Force $zipPath
-
 
     - name: Patch WiX Bundle.wxs
       shell: pwsh
