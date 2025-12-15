@@ -1,16 +1,15 @@
-name: build
+name: Build Qt6 Windows x64
 
 on:
   workflow_dispatch:
   push:
     branches:
-      - master
-      - main
       - qt6
 
 jobs:
   build-win64:
     runs-on: windows-latest
+    if: github.ref == 'refs/heads/qt6'
 
     steps:
     - uses: actions/checkout@v4
@@ -48,10 +47,9 @@ jobs:
         # Use downloads.sourceforge.net for direct resolution
         $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20251214-git-f7be2ee.7z"
         
-        # UserAgent 'curl' forces SourceForge to give a redirect, not an HTML page
+        # UserAgent 'curl' forces SourceForge to give a redirect
         Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
         
-        # Validation
         if ((Get-Item "mpv.7z").Length -lt 1000000) { throw "Download failed: mpv.7z is too small" }
         
         7z x mpv.7z -ompv
@@ -94,8 +92,12 @@ jobs:
         # MpvQt
         git clone https://github.com/KDE/mpvqt.git
         cd mpvqt
-        # Note: We point CMAKE_PREFIX_PATH to dep-install (for ECM) and Qt6_DIR
-        cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX=../dep-install -DCMAKE_PREFIX_PATH="$PWD/../dep-install;$Qt6_DIR"
+        # Explicitly pass CMAKE_INCLUDE_PATH and MPV_INCLUDE_DIR to fix missing header
+        cmake -B build -GNinja \
+          -DCMAKE_INSTALL_PREFIX=../dep-install \
+          -DCMAKE_PREFIX_PATH="$PWD/../dep-install;$Qt6_DIR" \
+          -DCMAKE_INCLUDE_PATH="$PWD/../dep-install/include" \
+          -DMPV_INCLUDE_DIR="$PWD/../dep-install/include"
         ninja -C build install
         cd ..
 
@@ -108,7 +110,7 @@ jobs:
         curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
         cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
         
-        # OpenSSL 3.3.0 (Win64) - Required for Qt 6.8 Network
+        # OpenSSL 3.3.0 (Win64)
         curl -L https://mirror.firedaemon.com/openssl/openssl-3.3.0-dev-1-ga91d575-windows-x64.zip -o openssl.zip
         unzip -o openssl.zip -d openssl-temp
         cp openssl-temp/x64/bin/libssl-3-x64.dll dep-install/bin/
@@ -148,12 +150,10 @@ jobs:
         echo Deploying Qt...
         %Qt6_DIR%\bin\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
         
-        rem Copy dependencies to output folder
         copy %GITHUB_WORKSPACE%\dep-install\bin\libssl-3-x64.dll output\
         copy %GITHUB_WORKSPACE%\dep-install\bin\libcrypto-3-x64.dll output\
         copy %GITHUB_WORKSPACE%\dep-install\bin\libmpv-2.dll output\
         
-        rem Build Installer (WiX)
         ninja windows_package
 
     - name: Archive installer
