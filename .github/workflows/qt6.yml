@@ -247,17 +247,15 @@ jobs:
              # Determine Qt Bin Dir from windeployqt location
              $binDir = Split-Path -Parent $deployTool.Source
         } else {
-             # Fallback if PATH is missing it (try standard install location if env var exists, though env var failed before)
-             # Use a recursive search in a likely location if desperately needed, but for now error out with info
              Write-Error "windeployqt.exe not found in PATH."
         }
         
         Write-Host "Manually copying missing DLLs..."
         $outDir = "build\output"
         
-        # Safe copy with verification
-        $dlls = @("Qt6Xml.dll", "Qt6Widgets.dll", "Qt6Gui.dll", "Qt6Core.dll")
-        foreach ($dll in $dlls) {
+        # Qt DLLs that windeployqt might miss
+        $qtDlls = @("Qt6Xml.dll", "Qt6Widgets.dll", "Qt6Gui.dll", "Qt6Core.dll", "Qt6Network.dll", "Qt6Concurrent.dll")
+        foreach ($dll in $qtDlls) {
             $src = "$binDir\$dll"
             if (Test-Path $src) {
                 Copy-Item -Force $src $outDir
@@ -267,19 +265,28 @@ jobs:
             }
         }
         
-        # Copy external deps
-        Copy-Item -Force "dep-install\bin\libssl-3-x64.dll" $outDir
-        Copy-Item -Force "dep-install\bin\libcrypto-3-x64.dll" $outDir
-        Copy-Item -Force "dep-install\bin\libmpv-2.dll" $outDir
-        Copy-Item -Force "dep-install\bin\SDL2.dll" $outDir
+        # Copy all custom-built dependencies from dep-install
+        $depDlls = @(
+            "libssl-3-x64.dll",
+            "libcrypto-3-x64.dll", 
+            "libmpv-2.dll",
+            "SDL2.dll",
+            "MpvQt.dll"
+        )
         
-        # Copy MpvQt (It was built and installed to dep-install/bin)
-        if (Test-Path "dep-install\bin\MpvQt.dll") {
-            Copy-Item -Force "dep-install\bin\MpvQt.dll" $outDir
-            Write-Host "Copied MpvQt.dll"
-        } else {
-            Write-Warning "MpvQt.dll not found in dep-install\bin!"
+        foreach ($dll in $depDlls) {
+            $src = "dep-install\bin\$dll"
+            if (Test-Path $src) {
+                Copy-Item -Force $src $outDir
+                Write-Host "Copied $dll"
+            } else {
+                Write-Warning "Could not find $dll in dep-install\bin!"
+            }
         }
+        
+        # Verify what's in the output folder
+        Write-Host "`nFinal DLL list in output folder:"
+        Get-ChildItem -Path $outDir -Filter *.dll | Select-Object Name
 
     - name: Build Installer Package
       shell: cmd
