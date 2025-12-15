@@ -63,7 +63,7 @@ jobs:
         $defContent | Set-Content libmpv-2.def
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
         
-        # Correctly stage headers and libs
+        # Copy headers and libs
         Copy-Item -Recurse -Force include\* ..\dep-install\include\
         Copy-Item libmpv.lib ..\dep-install\lib\
         Copy-Item libmpv-2.dll ..\dep-install\bin\
@@ -79,17 +79,15 @@ jobs:
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
         cmake -B build -GNinja -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
+        if %errorlevel% neq 0 exit /b %errorlevel%
+        
         ninja -C build install
+        if %errorlevel% neq 0 exit /b %errorlevel%
         cd ..
         
-        rem --- Build MpvQt ---
-        git clone https://github.com/KDE/mpvqt.git
+        rem --- Build MpvQt (Use v1.0.0 Tag for Stability) ---
+        git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
         cd mpvqt
-        
-        rem PATCH: Fix MSVC C2027 (incomplete type deletion)
-        rem We use PowerShell to replace inline destructor with declaration and add definition to cpp
-        powershell -Command "(Get-Content src/mpvcontroller.h) -replace '~MpvController\(\) = default;', '~MpvController();' | Set-Content src/mpvcontroller.h"
-        powershell -Command "Add-Content src/mpvcontroller.cpp '`nMpvController::~MpvController() = default;'"
         
         cmake -B build -GNinja ^
           -DCMAKE_C_COMPILER=cl ^
@@ -98,11 +96,16 @@ jobs:
           -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" ^
           -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" ^
           -DCMAKE_CXX_FLAGS="-I%INSTALL_DIR_FWD%/include -EHsc"
+        if %errorlevel% neq 0 exit /b %errorlevel%
         
         ninja -C build install
+        if %errorlevel% neq 0 exit /b %errorlevel%
         
         rem Verify install
-        dir /s /b "%INSTALL_DIR%\MpvQtConfig.cmake"
+        if not exist "%INSTALL_DIR%\lib\cmake\MpvQt\MpvQtConfig.cmake" (
+           echo ERROR: MpvQtConfig.cmake not found! Build likely failed silently.
+           exit /b 1
+        )
         cd ..
 
     - name: Download & Stage VC++ Redist and OpenSSL 3
@@ -139,6 +142,8 @@ jobs:
             $content = Get-Content -Raw $bundle -Encoding UTF8
             $pattern = 'Source=".*vcredist_x64.exe"'
             $patched = $content -replace $pattern, 'Source="bundle\win\vcredist_x64.exe"'
+            $pattern2 = 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe'
+            $patched = [regex]::Replace($patched, $pattern2, 'vcredist_x64.exe')
             Set-Content -LiteralPath $bundle -Value $patched -Encoding UTF8
         }
 
