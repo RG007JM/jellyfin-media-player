@@ -31,7 +31,6 @@ jobs:
         mkdir dep-install\lib
         mkdir dep-install\bin
         
-        rem --- FIXED URLS ---
         curl -L https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip -o ninja.zip
         tar -xf ninja.zip -C dep-install\bin
         del ninja.zip
@@ -99,14 +98,12 @@ jobs:
         set "INSTALL_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
         set "INCLUDE_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install/include"
         
-        rem --- FIXED URLS ---
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
         cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
         ninja -C build install
         cd ..
         
-        rem --- FIXED URLS ---
         git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
         cd mpvqt
         
@@ -151,105 +148,32 @@ jobs:
         }
 
     - name: Build Jellyfin Desktop
-      shell: cmd
-      run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
-        
-        rem --- PATCH 1: Remove MprisComponent ---
-        powershell -Command "$f='src/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'mpris/MprisComponent' -and $_ -notmatch 'add_subdirectory.mpris.' -and $_ -notmatch 'Qt6::DBus' } | Set-Content $f"
-        powershell -Command "$f='src/core/ComponentManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'MprisComponent' } | Set-Content $f"
-        if exist src\mpris rmdir /s /q src\mpris
-        
-        rem --- PATCH 2: Remove TaskbarComponent ---
-        powershell -Command "$f='src/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'taskbar' -and $_ -notmatch 'TaskbarComponent' } | Set-Content $f"
-        powershell -Command "$f='src/core/ComponentManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' } | Set-Content $f"
-        powershell -Command "$f='src/ui/WindowManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'm_taskbar' } | Set-Content $f"
-        if exist src\taskbar rmdir /s /q src\taskbar
-        
-        rem --- PATCH 3: Tests and Codecs ---
-        powershell -Command "if (Test-Path tests/CMakeLists.txt) { $f='tests/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'MprisComponent' } | Set-Content $f }"
-        powershell -Command "$f='src/player/CodecsComponent.cpp'; $c=Get-Content $f -Raw; $c='#include <windows.h>' + [Environment]::NewLine + $c; Set-Content $f $c"
-
-        set "DEP_INSTALL=%GITHUB_WORKSPACE%\dep-install"
-        set "DEP_INSTALL_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
-        set "MPV_LIB_FWD=%GITHUB_WORKSPACE:\=/%/dep-install/lib/libmpv.lib"
-        set "MPV_INC_FWD=%GITHUB_WORKSPACE:\=/%/dep-install/include"
-        
-        for /f "delims=" %%i in ('dir /s /b "%DEP_INSTALL%\MpvQtConfig.cmake"') do set MPVQT_CONFIG_PATH=%%~dpi
-        if defined MPVQT_CONFIG_PATH set MPVQT_DIR=%MPVQT_CONFIG_PATH%
-        
-        rem --- FIXED: Pass MPV_LIBRARY and MPV_INCLUDE_DIR Explicitly ---
-        cmake -B build -GNinja ^
-          -DCMAKE_BUILD_TYPE=Release ^
-          -DCMAKE_INSTALL_PREFIX=output ^
-          -DCMAKE_PREFIX_PATH="%DEP_INSTALL_FWD%;%Qt6_DIR%" ^
-          -DMpvQt_DIR="%MPVQT_DIR%" ^
-          -DMPV_LIBRARY="%MPV_LIB_FWD%" ^
-          -DMPV_INCLUDE_DIR="%MPV_INC_FWD%" ^
-          .
-        
-        cd build
-        ninja
-        ninja install
-
-    - name: Deploy Qt and Finalize Dependencies
       shell: pwsh
       run: |
-        $outDir = "build\output"
-        $target = "$outDir\Jellyfin Desktop.exe"
-        
-        & "windeployqt" --release --qmldir src\ui --compiler-runtime --no-opengl-sw --xml $target
-        
-        # --- FIX: ROBUST VC Runtime Renaming Logic (x64 Safe) ---
-        $searchRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
-        # Ensure we only look in x64 folders to avoid 32-bit mixups
-        $vsRedistDir = (Get-ChildItem $searchRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.DirectoryName -match "x64" } | Select-Object -First 1).DirectoryName
-        
-        Write-Host "Detected VC Redist Dir: $vsRedistDir"
-        
-        $runtimeMap = @{
-            "vcruntime140_1.dll" = @("vcruntime140_1.dll", "vcruntime1401.dll");
-            "msvcp140_1.dll"     = @("msvcp140_1.dll", "msvcp1401.dll");
-            "msvcp140_2.dll"     = @("msvcp140_2.dll", "msvcp1402.dll");
-            "vcruntime140.dll"   = @("vcruntime140.dll");
-            "msvcp140.dll"       = @("msvcp140.dll")
+        # --- Environment Setup (manually, since we are in pwsh) ---
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && set > %TEMP%\vcvars.txt"
+        Get-Content "$env:TEMP\vcvars.txt" | ForEach-Object {
+          if ($_ -match "^(.*?)=(.*)$") {
+            Set-Content "env:$($matches[1])" $matches[2]
+          }
         }
-        
-        foreach ($correctName in $runtimeMap.Keys) {
-            $candidates = $runtimeMap[$correctName]
-            $found = $false
-            foreach ($cand in $candidates) {
-                $srcPath = "$vsRedistDir\$cand"
-                if (Test-Path $srcPath) {
-                    Copy-Item -Force $srcPath "$outDir\$correctName"
-                    Write-Host "FIX: Copied $cand as $correctName"
-                    $found = $true
-                    break
-                }
-            }
-            if (-not $found) { Write-Warning "Could not find any candidate for $correctName" }
-        }
-        
-        # --- Copy Other Dependencies ---
-        "libssl-3-x64.dll", "libcrypto-3-x64.dll", "libmpv-2.dll", "SDL2.dll", "MpvQt.dll" | ForEach-Object {
-            Copy-Item -Force "dep-install\bin\$_" $outDir
-        }
-        
-        # --- Final Verification ---
-        Write-Host "--- Final DLLs in Output Directory ---"
-        Get-ChildItem -Path $outDir -Filter *.dll | Select-Object Name
+        $env:PATH += ";C:\Program Files (x86)\WiX Toolset v3.11\bin"
 
-    - name: Build Installer Package
-      shell: cmd
-      run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
-        cd build
-        ninja windows_package
+        # --- PATH NORMALIZATION ---
+        $root = (Get-Location).Path.Replace("\", "/")
+        $depInstall = "$root/dep-install"
+        $libMpv = "$depInstall/lib/libmpv.lib"
+        $incMpv = "$depInstall/include"
+        $mpvQtDir = "$depInstall/lib/cmake/MpvQt"
 
-    - name: Archive installer
-      uses: actions/upload-artifact@v4
-      with:
-        name: jellyfin-desktop-windows
-        path: ${{ github.workspace }}/build/JellyfinDesktop-*.exe
+        Write-Host "--- PATHS ---"
+        Write-Host "ROOT: $root"
+        Write-Host "MPV LIB: $libMpv"
+        Write-Host "MPV INC: $incMpv"
+        Write-Host "MPVQT: $mpvQtDir"
+        
+        if (-not (Test-Path $libMpv)) { Write-Error "FATAL: libmpv.lib NOT FOUND at $libMpv"; exit 1 }
+
+        # --- PATCH 1: Remove MprisComponent ---
+        $f='src/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'mpris/MprisComponent' -and $_ -notmatch 'add_subdirectory.mpris.' -and $_ -notmatch 'Qt6::DBus' } | Set-Content $f
+        $f='src/core/ComponentManager.cpp'; $c=Get-Content $f; $c | Where
