@@ -231,16 +231,45 @@ jobs:
         ninja install
         
         echo Deploying Qt...
-        %Qt6_DIR%\bin\windeployqt.exe --release --qmldir ..\src\ui "output\Jellyfin Desktop.exe"
+
+    - name: Deploy Qt and Copy Dependencies
+      shell: pwsh
+      run: |
+        $qtDir = $env:Qt6_DIR
+        $deployTool = "$qtDir\bin\windeployqt.exe"
+        $target = "build\output\Jellyfin Desktop.exe"
         
-        echo Manually copying missing Qt DLLs...
-        copy "%Qt6_DIR%\bin\Qt6Xml.dll" output\
+        Write-Host "Running windeployqt..."
+        & $deployTool --release --qmldir src\ui --xml $target
         
-        copy "%DEP_INSTALL%\bin\libssl-3-x64.dll" output\
-        copy "%DEP_INSTALL%\bin\libcrypto-3-x64.dll" output\
-        copy "%DEP_INSTALL%\bin\libmpv-2.dll" output\
-        copy "%DEP_INSTALL%\bin\SDL2.dll" output\
+        Write-Host "Manually copying missing DLLs..."
+        $binDir = "$qtDir\bin"
+        $outDir = "build\output"
         
+        # Safe copy with verification
+        $dlls = @("Qt6Xml.dll", "Qt6Widgets.dll", "Qt6Gui.dll", "Qt6Core.dll")
+        foreach ($dll in $dlls) {
+            $src = "$binDir\$dll"
+            if (Test-Path $src) {
+                Copy-Item -Force $src $outDir
+                Write-Host "Copied $dll"
+            } else {
+                Write-Warning "Could not find $dll at $src"
+            }
+        }
+        
+        # Copy external deps
+        Copy-Item -Force "dep-install\bin\libssl-3-x64.dll" $outDir
+        Copy-Item -Force "dep-install\bin\libcrypto-3-x64.dll" $outDir
+        Copy-Item -Force "dep-install\bin\libmpv-2.dll" $outDir
+        Copy-Item -Force "dep-install\bin\SDL2.dll" $outDir
+
+    - name: Build Installer Package
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
+        cd build
         ninja windows_package
 
     - name: Archive installer
