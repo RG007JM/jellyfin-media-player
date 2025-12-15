@@ -44,7 +44,6 @@ jobs:
       shell: pwsh
       run: |
         $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20251214-git-f7be2ee.7z"
-        # SourceForge requires a 'curl' or 'wget' UA to return a redirect instead of HTML
         Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
         
         if ((Get-Item "mpv.7z").Length -lt 1000000) { throw "Download failed: mpv.7z is too small" }
@@ -111,39 +110,38 @@ jobs:
         Invoke-WebRequest -Uri $vcUrl -OutFile "vc_redist.x64.exe" -UserAgent "curl/7.88.1"
         Copy-Item "vc_redist.x64.exe" "bundle/win/vcredist_x64.exe"
         
-        # OpenSSL 3.3.0 (Win64) - FireDaemon Mirror
-        # Using the Browser User-Agent that was verified to work in local testing
-        $sslUrl = "https://mirror.firedaemon.com/openssl/openssl-3.3.0-dev-1-ga91d575-windows-x64.zip"
+        # OpenSSL 3.6.0 - Direct FireDaemon CDN (reliable, no mirror subdomain)
+        $sslUrl = "https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-3.6.0.zip"
         $zipPath = "openssl.zip"
-        $validUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         
         Write-Host "Downloading OpenSSL from $sslUrl..."
         try {
-            Invoke-WebRequest -Uri $sslUrl -OutFile $zipPath -UserAgent $validUA -MaximumRedirection 5
+            # Direct CDN doesn't require special UA, but we'll use a standard one
+            Invoke-WebRequest -Uri $sslUrl -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -MaximumRedirection 5
         } catch {
             Write-Error "Download failed: $_"
             exit 1
         }
         
-        # Verify file size (should be > 10MB)
-        if ((Get-Item $zipPath).Length -lt 10000000) { 
-            Write-Error "OpenSSL zip is too small. Likely blocked/corrupted." 
+        # Verify file size
+        if ((Get-Item $zipPath).Length -lt 1000000) { 
+            Write-Error "OpenSSL zip is too small ($((Get-Item $zipPath).Length) bytes)."
             exit 1 
         }
         
         Write-Host "Extracting OpenSSL..."
         Expand-Archive -Path $zipPath -DestinationPath "openssl-temp" -Force
         
-        # Locate the bin folder (structure might vary)
-        $binPath = Get-ChildItem -Path "openssl-temp" -Recurse -Directory -Filter "bin" | Select-Object -First 1 -ExpandProperty FullName
+        # The ZIP contains x64, x86, and ARM64 folders - we want x64
+        $binPath = Get-ChildItem -Path "openssl-temp" -Recurse -Filter "libssl-3-x64.dll" | Select-Object -First 1 | Split-Path -Parent
         
         if (-not $binPath) {
-            Write-Error "Could not find 'bin' folder in extracted OpenSSL zip"
+            Write-Error "Could not find libssl-3-x64.dll in extracted OpenSSL zip"
             Get-ChildItem -Path "openssl-temp" -Recurse | Select-Object FullName
             exit 1
         }
         
-        Write-Host "Found bin path: $binPath"
+        Write-Host "Found OpenSSL DLLs at: $binPath"
         Copy-Item "$binPath\libssl-3-x64.dll" "dep-install\bin\"
         Copy-Item "$binPath\libcrypto-3-x64.dll" "dep-install\bin\"
         
