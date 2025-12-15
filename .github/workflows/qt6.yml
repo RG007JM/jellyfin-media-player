@@ -32,6 +32,7 @@ jobs:
         mkdir dep-install\lib
         mkdir dep-install\bin
         
+        rem --- FIX: Removed Markdown formatting from URL ---
         curl -L https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip -o ninja.zip
         tar -xf ninja.zip -C dep-install\bin
         del ninja.zip
@@ -98,14 +99,22 @@ jobs:
         set "INSTALL_DIR=%GITHUB_WORKSPACE%\dep-install"
         set "INSTALL_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
         
+        rem --- FIX: Removed Markdown formatting from git URLs ---
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
         cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
         ninja -C build install
         cd ..
         
+        rem --- FIX: Removed Markdown formatting from git URLs ---
         git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
         cd mpvqt
+        
+        rem --- PATCH MPVQT FOR MSVC ---
+        powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
+        echo. >> src\mpvcontroller.cpp
+        echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
+        
         cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake"
         ninja -C build install
         cd ..
@@ -124,19 +133,51 @@ jobs:
         Copy-Item "$binPath\libcrypto-3-x64.dll" "dep-install\bin\"
         Remove-Item -Recurse -Force "openssl-temp", "openssl.zip"
 
+    - name: Patch WiX Bundle.wxs
+      shell: pwsh
+      run: |
+        $bundle  = "bundle/win/Bundle.wxs"
+        if (Test-Path $bundle) {
+            $c = Get-Content -Raw $bundle -Encoding UTF8
+            $c = $c -replace 'Source=".*vcredist_x64.exe"', 'Source="bundle\win\vcredist_x64.exe"'
+            $c = [regex]::Replace($c, 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe', 'vcredist_x64.exe')
+            Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
+        }
+
     - name: Build Jellyfin Desktop
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
+        
+        rem --- PATCH 1: Remove MprisComponent ---
+        powershell -Command "$f='src/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'mpris/MprisComponent' -and $_ -notmatch 'add_subdirectory.mpris.' -and $_ -notmatch 'Qt6::DBus' } | Set-Content $f"
+        powershell -Command "$f='src/core/ComponentManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'MprisComponent' } | Set-Content $f"
+        if exist src\mpris rmdir /s /q src\mpris
+        
+        rem --- PATCH 2: Remove TaskbarComponent ---
+        powershell -Command "$f='src/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'taskbar' -and $_ -notmatch 'TaskbarComponent' } | Set-Content $f"
+        powershell -Command "$f='src/core/ComponentManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' } | Set-Content $f"
+        powershell -Command "$f='src/ui/WindowManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'm_taskbar' } | Set-Content $f"
+        if exist src\taskbar rmdir /s /q src\taskbar
+        
+        rem --- PATCH 3: Tests and Codecs ---
+        powershell -Command "if (Test-Path tests/CMakeLists.txt) { $f='tests/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'MprisComponent' } | Set-Content $f }"
+        powershell -Command "$f='src/player/CodecsComponent.cpp'; $c=Get-Content $f -Raw; $c='#include <windows.h>' + [Environment]::NewLine + $c; Set-Content $f $c"
+
         cd build
         
+        set "DEP_INSTALL=%GITHUB_WORKSPACE%\dep-install"
         set "DEP_INSTALL_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
+        
+        for /f "delims=" %%i in ('dir /s /b "%DEP_INSTALL%\MpvQtConfig.cmake"') do set MPVQT_CONFIG_PATH=%%~dpi
+        if defined MPVQT_CONFIG_PATH set MPVQT_DIR=%MPVQT_CONFIG_PATH%
         
         cmake -GNinja ^
           -DCMAKE_BUILD_TYPE=Release ^
           -DCMAKE_INSTALL_PREFIX=output ^
           -DCMAKE_PREFIX_PATH="%DEP_INSTALL_FWD%;%Qt6_DIR%" ^
+          -DMpvQt_DIR="%MPVQT_DIR%" ^
           ..
         
         ninja
@@ -150,22 +191,34 @@ jobs:
         
         & "windeployqt" --release --qmldir src\ui --compiler-runtime --no-opengl-sw --xml $target
         
-        # --- FIX: VC Runtime Renaming Logic ---
-        $vsRedistDir = (Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC" -Recurse -Filter "vcruntime140.dll" | Select-Object -First 1).DirectoryName
+        # --- FIX: ROBUST VC Runtime Renaming Logic (x64 Safe) ---
+        $searchRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
+        # Ensure we only look in x64 folders to avoid 32-bit mixups
+        $vsRedistDir = (Get-ChildItem $searchRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.DirectoryName -match "x64" } | Select-Object -First 1).DirectoryName
+        
+        Write-Host "Detected VC Redist Dir: $vsRedistDir"
         
         $runtimeMap = @{
-            "vcruntime140_1.dll" = "vcruntime1401.dll";
-            "msvcp140_1.dll"     = "msvcp1401.dll";
-            "msvcp140_2.dll"     = "msvcp1402.dll"
+            "vcruntime140_1.dll" = @("vcruntime140_1.dll", "vcruntime1401.dll");
+            "msvcp140_1.dll"     = @("msvcp140_1.dll", "msvcp1401.dll");
+            "msvcp140_2.dll"     = @("msvcp140_2.dll", "msvcp1402.dll");
+            "vcruntime140.dll"   = @("vcruntime140.dll");
+            "msvcp140.dll"       = @("msvcp140.dll")
         }
         
         foreach ($correctName in $runtimeMap.Keys) {
-            $wrongName = $runtimeMap[$correctName]
-            $srcPath = "$vsRedistDir\$wrongName"
-            if (Test-Path $srcPath) {
-                Copy-Item -Force $srcPath "$outDir\$correctName"
-                Write-Host "FIX: Copied $wrongName as $correctName"
+            $candidates = $runtimeMap[$correctName]
+            $found = $false
+            foreach ($cand in $candidates) {
+                $srcPath = "$vsRedistDir\$cand"
+                if (Test-Path $srcPath) {
+                    Copy-Item -Force $srcPath "$outDir\$correctName"
+                    Write-Host "FIX: Copied $cand as $correctName"
+                    $found = $true
+                    break
+                }
             }
+            if (-not $found) { Write-Warning "Could not find any candidate for $correctName" }
         }
         
         # --- Copy Other Dependencies ---
