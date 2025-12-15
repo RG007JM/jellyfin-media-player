@@ -40,6 +40,25 @@ jobs:
         rem Add dep-install\bin to PATH
         echo %GITHUB_WORKSPACE%\dep-install\bin>> %GITHUB_PATH%
 
+    - name: Install Vulkan SDK
+      shell: pwsh
+      run: |
+        # Installing Vulkan SDK to enable WrapVulkanHeaders and Vulkan support
+        choco install vulkan-sdk -y --no-progress
+        
+        # Locate SDK and set Environment Variables for CMake
+        $vulkanRoot = "C:\VulkanSDK"
+        if (Test-Path $vulkanRoot) {
+            $latestSdk = Get-ChildItem $vulkanRoot | Sort-Object Name -Descending | Select-Object -First 1
+            if ($latestSdk) {
+                Write-Host "Found Vulkan SDK at $($latestSdk.FullName)"
+                echo "VULKAN_SDK=$($latestSdk.FullName)" >> $env:GITHUB_ENV
+                echo "VK_SDK_PATH=$($latestSdk.FullName)" >> $env:GITHUB_ENV
+                echo "$($latestSdk.FullName)\Bin" >> $env:GITHUB_PATH
+                echo "$($latestSdk.FullName)\Include" >> $env:GITHUB_PATH
+            }
+        }
+
     - name: Prepare Libmpv
       shell: pwsh
       run: |
@@ -67,6 +86,22 @@ jobs:
         Copy-Item -Recurse -Force include\* ..\dep-install\include\
         Copy-Item libmpv.lib ..\dep-install\lib\
         Copy-Item libmpv-2.dll ..\dep-install\bin\
+
+    - name: Prepare SDL2
+      shell: pwsh
+      run: |
+        # Download SDL2 for Gamepad support
+        $url = "https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip"
+        Invoke-WebRequest -Uri $url -OutFile "sdl2.zip"
+        Expand-Archive -Path "sdl2.zip" -DestinationPath "sdl2-temp" -Force
+        $root = Get-ChildItem "sdl2-temp" | Select-Object -First 1
+        
+        Copy-Item -Recurse -Force "$($root.FullName)\include\*" "dep-install\include\"
+        Copy-Item -Force "$($root.FullName)\lib\x64\SDL2.lib" "dep-install\lib\"
+        Copy-Item -Force "$($root.FullName)\lib\x64\SDL2main.lib" "dep-install\lib\"
+        Copy-Item -Force "$($root.FullName)\lib\x64\SDL2.dll" "dep-install\bin\"
+        Remove-Item -Recurse -Force "sdl2-temp"
+        Remove-Item "sdl2.zip"
 
     - name: Prepare ECM and MpvQt
       shell: cmd
@@ -158,11 +193,14 @@ jobs:
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
         
-        rem --- PATCH: Remove Qt6::DBus and MPRIS from build ---
-        powershell -Command "(Get-Content src/CMakeLists.txt) -replace 'Qt6::DBus', '' -replace 'mpris/MprisComponent.cpp', '' -replace 'mpris/MprisComponent.h', '' | Set-Content src/CMakeLists.txt"
+        rem --- PATCH: Remove MprisComponent from CMakeLists (robust filtering) ---
+        powershell -Command "Get-Content src/CMakeLists.txt | Where-Object { $_ -notmatch 'mpris/MprisComponent' } | Set-Content src/CMakeLists.txt"
         
         rem --- PATCH: Remove MprisComponent from ComponentManager ---
-        powershell -Command "(Get-Content src/core/ComponentManager.cpp) -replace '#include .mpris/MprisComponent.h.', '' -replace '.*MprisComponent.*', '' | Set-Content src/core/ComponentManager.cpp"
+        powershell -Command "(Get-Content src/core/ComponentManager.cpp) -replace '#include .mpris/MprisComponent.h.', '' -replace 'registerComponent.MprisComponent..;', '' | Set-Content src/core/ComponentManager.cpp"
+        
+        rem --- PATCH: Remove Qt6::DBus ---
+        powershell -Command "(Get-Content src/CMakeLists.txt) -replace 'Qt6::DBus', '' | Set-Content src/CMakeLists.txt"
         
         rem --- PATCH: Add windows.h to CodecsComponent.cpp ---
         powershell -Command "$c = Get-Content src/player/CodecsComponent.cpp -Raw; $c = '#include <windows.h>' + [Environment]::NewLine + $c; Set-Content src/player/CodecsComponent.cpp $c"
@@ -181,9 +219,6 @@ jobs:
         for /f "delims=" %%i in ('dir /s /b "%DEP_INSTALL%\ECMConfig.cmake"') do set ECM_CONFIG_PATH=%%~dpi
         if defined ECM_CONFIG_PATH set ECM_DIR=%ECM_CONFIG_PATH%
         
-        echo Found MpvQt DIR: %MPVQT_DIR%
-        echo Found ECM DIR: %ECM_DIR%
-        
         cmake -GNinja ^
           -DCMAKE_C_COMPILER=cl ^
           -DCMAKE_CXX_COMPILER=cl ^
@@ -195,6 +230,8 @@ jobs:
           -DQTROOT="%Qt6_DIR%" ^
           -DMPV_INCLUDE_DIR="%DEP_INSTALL_FWD%/include" ^
           -DMPV_LIBRARY="%DEP_INSTALL_FWD%/lib/libmpv.lib" ^
+          -DSDL2_INCLUDE_DIR="%DEP_INSTALL_FWD%/include" ^
+          -DSDL2_LIBRARY="%DEP_INSTALL_FWD%/lib/SDL2.lib" ^
           ..
         
         ninja
@@ -206,6 +243,7 @@ jobs:
         copy "%DEP_INSTALL%\bin\libssl-3-x64.dll" output\
         copy "%DEP_INSTALL%\bin\libcrypto-3-x64.dll" output\
         copy "%DEP_INSTALL%\bin\libmpv-2.dll" output\
+        copy "%DEP_INSTALL%\bin\SDL2.dll" output\
         
         ninja windows_package
 
