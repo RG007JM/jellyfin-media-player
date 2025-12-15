@@ -26,7 +26,6 @@ jobs:
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        mkdir build
         mkdir dep-install
         mkdir dep-install\include
         mkdir dep-install\lib
@@ -98,7 +97,6 @@ jobs:
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         set "INSTALL_DIR=%GITHUB_WORKSPACE%\dep-install"
         set "INSTALL_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
-        set "INCLUDE_DIR=%GITHUB_WORKSPACE%\dep-install\include"
         set "INCLUDE_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install/include"
         
         rem --- FIXED URLS ---
@@ -173,21 +171,21 @@ jobs:
         powershell -Command "if (Test-Path tests/CMakeLists.txt) { $f='tests/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'MprisComponent' } | Set-Content $f }"
         powershell -Command "$f='src/player/CodecsComponent.cpp'; $c=Get-Content $f -Raw; $c='#include <windows.h>' + [Environment]::NewLine + $c; Set-Content $f $c"
 
-        cd build
-        
         set "DEP_INSTALL=%GITHUB_WORKSPACE%\dep-install"
         set "DEP_INSTALL_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
         
         for /f "delims=" %%i in ('dir /s /b "%DEP_INSTALL%\MpvQtConfig.cmake"') do set MPVQT_CONFIG_PATH=%%~dpi
         if defined MPVQT_CONFIG_PATH set MPVQT_DIR=%MPVQT_CONFIG_PATH%
         
-        cmake -GNinja ^
+        rem --- FIXED: Explicit Source and Build Directories ---
+        cmake -B build -GNinja ^
           -DCMAKE_BUILD_TYPE=Release ^
           -DCMAKE_INSTALL_PREFIX=output ^
           -DCMAKE_PREFIX_PATH="%DEP_INSTALL_FWD%;%Qt6_DIR%" ^
           -DMpvQt_DIR="%MPVQT_DIR%" ^
-          ..
+          .
         
+        cd build
         ninja
         ninja install
 
