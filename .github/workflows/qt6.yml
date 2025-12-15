@@ -20,7 +20,7 @@ jobs:
       with:
         version: "6.8.0"
         arch: "win64_msvc2022_64"
-        modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning qtshadertools qt5compat qtimageformats"
+        modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning qtshadertools qt5compat qtimageformats qtserialport"
 
     - name: Setup Build Environment (Ninja, Dirs, Reuse)
       shell: cmd
@@ -210,7 +210,7 @@ jobs:
         cmake -GNinja ^
           -DCMAKE_C_COMPILER=cl ^
           -DCMAKE_CXX_COMPILER=cl ^
-          -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
+          -DCMAKE_BUILD_TYPE=Release ^
           -DCMAKE_INSTALL_PREFIX=output ^
           -DCMAKE_PREFIX_PATH="%DEP_INSTALL_FWD%;%Qt6_DIR%" ^
           -DMpvQt_DIR="%MPVQT_DIR%" ^
@@ -253,8 +253,8 @@ jobs:
         Write-Host "Manually copying missing DLLs..."
         $outDir = "build\output"
         
-        # Qt DLLs that windeployqt might miss
-        $qtDlls = @("Qt6Xml.dll", "Qt6Widgets.dll", "Qt6Gui.dll", "Qt6Core.dll", "Qt6Network.dll", "Qt6Concurrent.dll")
+        # Qt DLLs that windeployqt might miss (Added Qt6Quick and Qt6Qml explicitly)
+        $qtDlls = @("Qt6Xml.dll", "Qt6Widgets.dll", "Qt6Gui.dll", "Qt6Core.dll", "Qt6Network.dll", "Qt6Concurrent.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6SerialPort.dll")
         foreach ($dll in $qtDlls) {
             $src = "$binDir\$dll"
             if (Test-Path $src) {
@@ -284,7 +284,15 @@ jobs:
             }
         }
         
-        # Verify what's in the output folder
+        # CLEANUP: Remove massive PDB files
+        Write-Host "Cleaning up .pdb files..."
+        Get-ChildItem -Path $outDir -Filter "*.pdb" -Recurse | Remove-Item -Force -Verbose
+
+        # Verify final size
+        $size = (Get-ChildItem $outDir -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
+        Write-Host "Final App Directory Size: $size MB"
+        
+        # Verify final DLL list
         Write-Host "`nFinal DLL list in output folder:"
         Get-ChildItem -Path $outDir -Filter *.dll | Select-Object Name
 
