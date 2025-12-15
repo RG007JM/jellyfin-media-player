@@ -312,6 +312,41 @@ jobs:
         Write-Host "--- Final Output Content ---"
         Get-ChildItem $outDir | Select-Object Name
 
+    - name: Debug Deployment (Deps & qt.conf)
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        echo --- qt.conf ---
+        if exist output\qt.conf type output\qt.conf
+        echo.
+        echo --- Qt6Quick.dll Dependencies ---
+        dumpbin /dependents output\Qt6Quick.dll
+        echo.
+        echo --- Executable Dependencies ---
+        dumpbin /dependents "output\Jellyfin Desktop.exe"
+
+    - name: Runtime Load Test (Python)
+      shell: pwsh
+      run: |
+        $script = @"
+        import ctypes, os, sys
+        os.chdir('output')
+        print(f'CWD: {os.getcwd()}')
+        
+        targets = ['Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Quick.dll', 'Jellyfin Desktop.exe']
+        for t in targets:
+            try:
+                if os.path.exists(t):
+                    ctypes.CDLL(os.path.abspath(t))
+                    print(f'[SUCCESS] Loaded {t}')
+                else:
+                    print(f'[MISSING] File not found: {t}')
+            except OSError as e:
+                print(f'[FAILURE] Error loading {t}: {e}')
+        "@
+        Set-Content check_deps.py $script
+        python check_deps.py
+
     - name: Build Installer Package
       shell: cmd
       run: |
