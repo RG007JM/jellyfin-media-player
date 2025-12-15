@@ -150,20 +150,13 @@ jobs:
     - name: Build Jellyfin Desktop
       shell: pwsh
       run: |
-        # --- PATH NORMALIZATION ---
         $root = (Get-Location).Path.Replace("\", "/")
         $depInstall = "$root/dep-install"
         $libMpv = "$depInstall/lib/libmpv.lib"
         $incMpv = "$depInstall/include"
         $mpvQtDir = "$depInstall/lib/cmake/MpvQt"
 
-        Write-Host "--- PATHS ---"
-        Write-Host "ROOT: $root"
-        Write-Host "MPV LIB: $libMpv"
-        Write-Host "MPV INC: $incMpv"
-        
         # --- OVERRIDE FindMPV.cmake ---
-        # This forces CMake to accept our paths without searching
         $cmakeMod = "CMakeModules/FindMPV.cmake"
         $overrideContent = @"
         set(MPV_FOUND TRUE)
@@ -180,10 +173,8 @@ jobs:
         endif()
         "@
         Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
-        Write-Host "Overwrote FindMPV.cmake with hardcoded paths."
 
         # --- PATCHES (Simplified Syntax) ---
-        # Removing MprisComponent
         $f='src/CMakeLists.txt'
         (Get-Content $f) | Where-Object { 
             $_ -notmatch 'mpris/MprisComponent' -and 
@@ -195,7 +186,6 @@ jobs:
         (Get-Content $f) | Where-Object { $_ -notmatch 'MprisComponent' } | Set-Content $f
         if (Test-Path src\mpris) { Remove-Item -Recurse -Force src\mpris }
         
-        # Removing TaskbarComponent
         $f='src/CMakeLists.txt'
         (Get-Content $f) | Where-Object { $_ -notmatch 'taskbar' -and $_ -notmatch 'TaskbarComponent' } | Set-Content $f
         
@@ -206,7 +196,6 @@ jobs:
         (Get-Content $f) | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'm_taskbar' } | Set-Content $f
         if (Test-Path src\taskbar) { Remove-Item -Recurse -Force src\taskbar }
 
-        # Tests and Codecs
         if (Test-Path tests/CMakeLists.txt) { 
             $f='tests/CMakeLists.txt'
             (Get-Content $f) | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'MprisComponent' } | Set-Content $f
@@ -217,9 +206,8 @@ jobs:
         $c='#include <windows.h>' + [Environment]::NewLine + $c
         Set-Content $f $c
 
-        # --- CMAKE CONFIGURE ---
+        # --- CMAKE & NINJA ---
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=output -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
-        
         if ($LASTEXITCODE -ne 0) { exit 1 }
         
         Set-Location build
@@ -229,37 +217,56 @@ jobs:
     - name: Deploy Qt and Finalize Dependencies
       shell: pwsh
       run: |
-        $outDir = "build\output"
-        $target = "$outDir\Jellyfin Desktop.exe"
+        $outDir = "build/output"
+        if (-not (Test-Path $outDir)) {
+            Write-Warning "Output directory '$outDir' not found! Checking 'build'..."
+            Get-ChildItem "build"
+            exit 1
+        }
+        $target = "$outDir/Jellyfin Desktop.exe"
         
-        & "windeployqt" --release --qmldir src\ui --compiler-runtime --no-opengl-sw --xml $target
-        
-        $searchRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
-        $vsRedistDir = (Get-ChildItem $searchRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.DirectoryName -match "x64" } | Select-Object -First 1).DirectoryName
-        
-        $runtimeMap = @{
-            "vcruntime140_1.dll" = @("vcruntime140_1.dll", "vcruntime1401.dll");
-            "msvcp140_1.dll"     = @("msvcp140_1.dll", "msvcp1401.dll");
-            "msvcp140_2.dll"     = @("msvcp140_2.dll", "msvcp1402.dll");
-            "vcruntime140.dll"   = @("vcruntime140.dll");
-            "msvcp140.dll"       = @("msvcp140.dll")
+        if (-not (Test-Path $target)) {
+             Write-Error "Target Executable not found at $target"
+             exit 1
         }
         
-        foreach ($correctName in $runtimeMap.Keys) {
-            $candidates = $runtimeMap[$correctName]
-            $found = $false
-            foreach ($cand in $candidates) {
-                $srcPath = "$vsRedistDir\$cand"
-                if (Test-Path $srcPath) {
-                    Copy-Item -Force $srcPath "$outDir\$correctName"
-                    $found = $true
-                    break
+        & "windeployqt" --release --qmldir src/ui --compiler-runtime --no-opengl-sw --xml "$target"
+        
+        # --- FIX: Hardcoded VC Redist Paths for GitHub Actions ---
+        $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
+        # Find the latest version folder
+        $latestVer = Get-ChildItem $vcRoot | Sort-Object Name -Descending | Select-Object -First 1
+        $redistDir = "$($latestVer.FullName)\x64\Microsoft.VC143.CRT"
+        
+        Write-Host "Using VC Redist Dir: $redistDir"
+        
+        $dlls = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll")
+        
+        foreach ($dll in $dlls) {
+            $src = "$redistDir\$dll"
+            if (Test-Path $src) {
+                Copy-Item -Force $src "$outDir\$dll"
+                Write-Host "Copied $dll"
+            } else {
+                # Fallback search if standard path fails
+                $found = Get-ChildItem -Path $vcRoot -Filter $dll -Recurse | Select-Object -First 1
+                if ($found) {
+                    Copy-Item -Force $found.FullName "$outDir\$dll"
+                    Write-Host "Found and copied $dll from $($found.FullName)"
+                } else {
+                    Write-Warning "Could not find $dll"
                 }
             }
         }
         
+        # --- Copy Other Deps ---
         "libssl-3-x64.dll", "libcrypto-3-x64.dll", "libmpv-2.dll", "SDL2.dll", "MpvQt.dll" | ForEach-Object {
-            Copy-Item -Force "dep-install\bin\$_" $outDir
+            $src = "dep-install\bin\$_"
+            if (Test-Path $src) {
+                Copy-Item -Force $src $outDir
+            } else {
+                Write-Warning "Missing dependency: $src"
+            }
         }
 
     - name: Build Installer Package
