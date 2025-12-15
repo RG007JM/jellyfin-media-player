@@ -44,21 +44,16 @@ jobs:
     - name: Prepare Libmpv
       shell: pwsh
       run: |
-        # Use downloads.sourceforge.net for direct resolution
         $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20251214-git-f7be2ee.7z"
-        
-        # UserAgent 'curl' forces SourceForge to give a redirect
         Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
         
         if ((Get-Item "mpv.7z").Length -lt 1000000) { throw "Download failed: mpv.7z is too small" }
         
         7z x mpv.7z -ompv
-        
         Set-Location mpv
         
-        # Create .def file from DLL using dumpbin
+        # Create .lib from .dll
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /exports libmpv-2.dll > exports.txt"
-        
         $defContent = @("LIBRARY libmpv-2.dll", "EXPORTS")
         $lines = Get-Content exports.txt
         foreach ($line in $lines) {
@@ -67,33 +62,89 @@ jobs:
             }
         }
         $defContent | Set-Content libmpv-2.def
-        
-        # Create .lib from .def
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
         
-        # CRITICAL FIX: The headers are already in include/mpv/, so copy the entire include folder
-        # This ensures dep-install/include/mpv/client.h exists (not dep-install/include/mpv/mpv/client.h)
+        # Correctly stage headers: 'include/mpv/client.h' -> 'dep-install/include/mpv/client.h'
         Copy-Item -Recurse -Force include\* ..\dep-install\include\
         Copy-Item libmpv.lib ..\dep-install\lib\
         Copy-Item libmpv-2.dll ..\dep-install\bin\
-        
         Set-Location ..
 
     - name: Prepare ECM and MpvQt
       shell: bash
       run: |
         set -e
-        # ECM (Extra CMake Modules)
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
         cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX=../dep-install
         ninja -C build install
         cd ..
         
-        # MpvQt
         git clone https://github.com/KDE/mpvqt.git
         cd mpvqt
+        # Force the include path via CMAKE_CXX_FLAGS to ensure it is picked up
+        # Also ensuring CMAKE_PREFIX_PATH uses forward slashes
         cmake -B build -GNinja \
           -DCMAKE_INSTALL_PREFIX=../dep-install \
-          -DCMAKE_PREFIX_PATH="$PWD/../dep-install;$Qt6_DIR"
+          -DCMAKE_PREFIX_PATH="$(pwd)/../dep-install;${Qt6_DIR}" \
+          -DCMAKE_CXX_FLAGS="-I$(pwd)/../dep-install/include"
         ninja -C build install
+        cd ..
+
+    - name: Download & Stage VC++ Redist and OpenSSL 3
+      shell: bash
+      run: |
+        mkdir -p bundle/win
+        curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
+        cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
+        
+        curl -L https://mirror.firedaemon.com/openssl/openssl-3.3.0-dev-1-ga91d575-windows-x64.zip -o openssl.zip
+        unzip -o openssl.zip -d openssl-temp
+        cp openssl-temp/x64/bin/libssl-3-x64.dll dep-install/bin/
+        cp openssl-temp/x64/bin/libcrypto-3-x64.dll dep-install/bin/
+        rm -rf openssl-temp openssl.zip
+
+    - name: Patch WiX Bundle.wxs
+      shell: pwsh
+      run: |
+        $bundle  = "bundle/win/Bundle.wxs"
+        if (Test-Path $bundle) {
+            $content = Get-Content -Raw $bundle -Encoding UTF8
+            $pattern = 'Source=".*vcredist_x64.exe"'
+            $patched = $content -replace $pattern, 'Source="bundle\win\vcredist_x64.exe"'
+            $pattern2 = 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe'
+            $patched = [regex]::Replace($patched, $pattern2, 'vcredist_x64.exe')
+            Set-Content -LiteralPath $bundle -Value $patched -Encoding UTF8
+        }
+
+    - name: Build Jellyfin Desktop
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
+        cd build
+        
+        cmake -GNinja ^
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
+          -DCMAKE_INSTALL_PREFIX=output ^
+          -DCMAKE_PREFIX_PATH="%GITHUB_WORKSPACE%\dep-install;%Qt6_DIR%" ^
+          -DQTROOT="%Qt6_DIR%" ^
+          ..
+        
+        ninja
+        ninja install
+        
+        echo Deploying Qt...
+        %Qt6_DIR%\bin\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
+        
+        copy %GITHUB_WORKSPACE%\dep-install\bin\libssl-3-x64.dll output\
+        copy %GITHUB_WORKSPACE%\dep-install\bin\libcrypto-3-x64.dll output\
+        copy %GITHUB_WORKSPACE%\dep-install\bin\libmpv-2.dll output\
+        
+        ninja windows_package
+
+    - name: Archive installer
+      uses: actions/upload-artifact@v4
+      with:
+        name: jellyfin-desktop-windows
+        path: ${{ github.workspace }}/build/JellyfinMediaPlayer-*.exe
