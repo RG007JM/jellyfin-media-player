@@ -272,6 +272,14 @@ jobs:
         Copy-Item -Force "dep-install\bin\libcrypto-3-x64.dll" $outDir
         Copy-Item -Force "dep-install\bin\libmpv-2.dll" $outDir
         Copy-Item -Force "dep-install\bin\SDL2.dll" $outDir
+        
+        # Copy MpvQt (It was built and installed to dep-install/bin)
+        if (Test-Path "dep-install\bin\MpvQt.dll") {
+            Copy-Item -Force "dep-install\bin\MpvQt.dll" $outDir
+            Write-Host "Copied MpvQt.dll"
+        } else {
+            Write-Warning "MpvQt.dll not found in dep-install\bin!"
+        }
 
     - name: Build Installer Package
       shell: cmd
