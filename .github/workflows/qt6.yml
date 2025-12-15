@@ -179,22 +179,21 @@ jobs:
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
         
-        rem --- PATCH 1: Remove MprisComponent (Safe Read-Write) ---
+        rem --- PATCH 1: Remove MprisComponent (Fixes QtDBus Error) ---
         powershell -Command "$f='src/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'mpris/MprisComponent' -and $_ -notmatch 'add_subdirectory.mpris.' -and $_ -notmatch 'Qt6::DBus' } | Set-Content $f"
         powershell -Command "$f='src/core/ComponentManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'MprisComponent' } | Set-Content $f"
         if exist src\mpris rmdir /s /q src\mpris
         
-        rem --- PATCH 2: Disable TaskbarComponent AGGRESSIVELY ---
-        rem Remove references in CMakeLists.txt (case-insensitive filter for 'taskbar')
+        rem --- PATCH 2: Disable TaskbarComponent (Fixes QWinTaskbarButton Error) ---
         powershell -Command "$f='src/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'taskbar' -and $_ -notmatch 'TaskbarComponent' } | Set-Content $f"
-        
-        rem Remove references in ComponentManager.cpp
         powershell -Command "$f='src/core/ComponentManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' } | Set-Content $f"
-        
-        rem Delete the taskbar source directory to be sure
+        powershell -Command "$f='src/ui/WindowManager.cpp'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'm_taskbar' } | Set-Content $f"
         if exist src\taskbar rmdir /s /q src\taskbar
         
-        rem --- PATCH 3: Add windows.h to CodecsComponent.cpp ---
+        rem --- PATCH 3: Disable Tests for Removed Components ---
+        powershell -Command "if (Test-Path tests/CMakeLists.txt) { $f='tests/CMakeLists.txt'; $c=Get-Content $f; $c | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'MprisComponent' } | Set-Content $f }"
+        
+        rem --- PATCH 4: Add windows.h to CodecsComponent.cpp ---
         powershell -Command "$f='src/player/CodecsComponent.cpp'; $c=Get-Content $f -Raw; $c='#include <windows.h>' + [Environment]::NewLine + $c; Set-Content $f $c"
 
         cd build
@@ -224,6 +223,11 @@ jobs:
           ..
         
         ninja
+        
+        echo Running Tests...
+        set QT_QPA_PLATFORM=offscreen
+        ctest -V
+        
         ninja install
         
         echo Deploying Qt...
