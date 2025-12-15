@@ -231,7 +231,7 @@ jobs:
         ninja install
         
         echo Deploying Qt...
-        %Qt6_DIR%\bin\windeployqt.exe --release --qmldir ..\src\ui "output\Jellyfin Desktop.exe"
+        %Qt6_DIR%\bin\windeployqt.exe --release --qmldir ..\src\ui --xml "output\Jellyfin Desktop.exe"
         
         copy "%DEP_INSTALL%\bin\libssl-3-x64.dll" output\
         copy "%DEP_INSTALL%\bin\libcrypto-3-x64.dll" output\
