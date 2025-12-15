@@ -235,15 +235,24 @@ jobs:
     - name: Deploy Qt and Copy Dependencies
       shell: pwsh
       run: |
-        $qtDir = $env:Qt6_DIR
-        $deployTool = "$qtDir\bin\windeployqt.exe"
         $target = "build\output\Jellyfin Desktop.exe"
         
-        Write-Host "Running windeployqt..."
-        & $deployTool --release --qmldir src\ui --xml $target
+        # Try to find windeployqt in PATH
+        $deployTool = Get-Command "windeployqt" -ErrorAction SilentlyContinue
+        
+        if ($deployTool) {
+             Write-Host "Found windeployqt at $($deployTool.Source)"
+             & $deployTool.Source --release --qmldir src\ui --xml $target
+             
+             # Determine Qt Bin Dir from windeployqt location
+             $binDir = Split-Path -Parent $deployTool.Source
+        } else {
+             # Fallback if PATH is missing it (try standard install location if env var exists, though env var failed before)
+             # Use a recursive search in a likely location if desperately needed, but for now error out with info
+             Write-Error "windeployqt.exe not found in PATH."
+        }
         
         Write-Host "Manually copying missing DLLs..."
-        $binDir = "$qtDir\bin"
         $outDir = "build\output"
         
         # Safe copy with verification
