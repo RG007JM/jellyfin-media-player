@@ -122,7 +122,6 @@ jobs:
             exit 1
         }
         
-        # Verify file size
         if ((Get-Item $zipPath).Length -lt 1000000) { 
             Write-Error "OpenSSL zip is too small ($((Get-Item $zipPath).Length) bytes)."
             exit 1 
@@ -167,19 +166,27 @@ jobs:
         set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
         cd build
         
-        rem Use forward slashes for CMake paths to fix MpvQt detection issues
-        set "DEP_INSTALL=%GITHUB_WORKSPACE:\=/%/dep-install"
-        set "QT_ROOT=%Qt6_DIR:\=/%"
+        rem Find MpvQtConfig.cmake location
+        for /f "delims=" %%i in ('dir /s /b ..\dep-install\MpvQtConfig.cmake') do set MPVQT_CONFIG_PATH=%%~dpi
+        rem Remove trailing backslash if present (though dpi usually has one, we can use it directly sometimes)
+        if defined MPVQT_CONFIG_PATH set MPVQT_DIR=%MPVQT_CONFIG_PATH%
+        
+        rem Find ECMConfig.cmake location
+        for /f "delims=" %%i in ('dir /s /b ..\dep-install\ECMConfig.cmake') do set ECM_CONFIG_PATH=%%~dpi
+        if defined ECM_CONFIG_PATH set ECM_DIR=%ECM_CONFIG_PATH%
+        
+        echo Found MpvQt DIR: %MPVQT_DIR%
+        echo Found ECM DIR: %ECM_DIR%
         
         cmake -GNinja ^
           -DCMAKE_C_COMPILER=cl ^
           -DCMAKE_CXX_COMPILER=cl ^
           -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
           -DCMAKE_INSTALL_PREFIX=output ^
-          -DCMAKE_PREFIX_PATH="%DEP_INSTALL%;%QT_ROOT%" ^
-          -DMpvQt_DIR="%DEP_INSTALL%/lib/cmake/MpvQt" ^
-          -DECM_DIR="%DEP_INSTALL%/share/ECM/cmake" ^
-          -DQTROOT="%QT_ROOT%" ^
+          -DCMAKE_PREFIX_PATH="%GITHUB_WORKSPACE%\dep-install;%Qt6_DIR%" ^
+          -DMpvQt_DIR="%MPVQT_DIR%" ^
+          -DECM_DIR="%ECM_DIR%" ^
+          -DQTROOT="%Qt6_DIR%" ^
           ..
         
         ninja
