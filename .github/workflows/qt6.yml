@@ -9,7 +9,6 @@ on:
 jobs:
   build-win64:
     runs-on: windows-latest
-    if: github.ref == 'refs/heads/qt6'
 
     steps:
     - uses: actions/checkout@v4
@@ -64,30 +63,39 @@ jobs:
         $defContent | Set-Content libmpv-2.def
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
         
-        # Correctly stage headers: 'include/mpv/client.h' -> 'dep-install/include/mpv/client.h'
+        # Correctly stage headers
         Copy-Item -Recurse -Force include\* ..\dep-install\include\
         Copy-Item libmpv.lib ..\dep-install\lib\
         Copy-Item libmpv-2.dll ..\dep-install\bin\
         Set-Location ..
 
     - name: Prepare ECM and MpvQt
-      shell: bash
+      shell: cmd
       run: |
-        set -e
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        
+        rem ECM (Extra CMake Modules)
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
-        cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX=../dep-install
+        cmake -B build -GNinja ^
+          -DCMAKE_C_COMPILER=cl ^
+          -DCMAKE_CXX_COMPILER=cl ^
+          -DCMAKE_INSTALL_PREFIX=../dep-install
         ninja -C build install
         cd ..
         
+        rem MpvQt
         git clone https://github.com/KDE/mpvqt.git
         cd mpvqt
-        # Force the include path via CMAKE_CXX_FLAGS to ensure it is picked up
-        # Also ensuring CMAKE_PREFIX_PATH uses forward slashes
-        cmake -B build -GNinja \
-          -DCMAKE_INSTALL_PREFIX=../dep-install \
-          -DCMAKE_PREFIX_PATH="$(pwd)/../dep-install;${Qt6_DIR}" \
-          -DCMAKE_CXX_FLAGS="-I$(pwd)/../dep-install/include"
+        
+        rem Force MSVC compiler and include path
+        cmake -B build -GNinja ^
+          -DCMAKE_C_COMPILER=cl ^
+          -DCMAKE_CXX_COMPILER=cl ^
+          -DCMAKE_INSTALL_PREFIX=../dep-install ^
+          -DCMAKE_PREFIX_PATH="%cd%/../dep-install;%Qt6_DIR%" ^
+          -DCMAKE_CXX_FLAGS="-I%cd%/../dep-install/include -EHsc"
+          
         ninja -C build install
         cd ..
 
@@ -125,6 +133,8 @@ jobs:
         cd build
         
         cmake -GNinja ^
+          -DCMAKE_C_COMPILER=cl ^
+          -DCMAKE_CXX_COMPILER=cl ^
           -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
           -DCMAKE_INSTALL_PREFIX=output ^
           -DCMAKE_PREFIX_PATH="%GITHUB_WORKSPACE%\dep-install;%Qt6_DIR%" ^
