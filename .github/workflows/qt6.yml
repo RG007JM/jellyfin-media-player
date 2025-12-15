@@ -238,22 +238,17 @@ jobs:
         $target = "build\output\Jellyfin Desktop.exe"
         $outDir = "build\output"
         
-        # 1. Run windeployqt with --compiler-runtime to grab MSVC DLLs cleanly
+        # 1. Run windeployqt
         $deployTool = Get-Command "windeployqt" -ErrorAction SilentlyContinue
-        
         if ($deployTool) {
-             Write-Host "Found windeployqt at $($deployTool.Source)"
-             # Added --compiler-runtime and --no-opengl-sw
+             # Added --compiler-runtime to get VC DLLs, --no-opengl-sw
              & $deployTool.Source --release --qmldir src\ui --compiler-runtime --no-opengl-sw --xml $target
-             
              $binDir = Split-Path -Parent $deployTool.Source
         } else {
              Write-Error "windeployqt.exe not found."
         }
         
-        Write-Host "Manually copying extra dependencies..."
-        
-        # 2. Force Copy Qt Modules (Safety Net)
+        # 2. Force Copy Qt Modules
         $qtDlls = @(
             "Qt6Xml.dll", "Qt6Widgets.dll", "Qt6Gui.dll", "Qt6Core.dll", 
             "Qt6Network.dll", "Qt6Concurrent.dll", "Qt6Quick.dll", "Qt6Qml.dll", 
@@ -263,37 +258,38 @@ jobs:
         )
         foreach ($dll in $qtDlls) {
             $src = "$binDir\$dll"
-            if (Test-Path $src) {
-                Copy-Item -Force $src $outDir
-            }
+            if (Test-Path $src) { Copy-Item -Force $src $outDir }
         }
         
-        # 3. Explicit VC Runtime Check (Fix for missing underscores)
-        # We manually verify if the required runtimes are present with correct names
-        $requiredRuntimes = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll")
+        # 3. FIX: VC Runtime Renaming Logic
+        # Qt6Quick.dll depends on vcruntime140_1.dll (with underscore).
+        # We must ensure the file is named exactly that in the output.
         
-        # Find source dir
         $vsRedistDir = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC" -Recurse -Filter "vcruntime140.dll" | Select-Object -First 1 | Split-Path -Parent
         if (-not $vsRedistDir) { $vsRedistDir = "C:\Windows\System32" }
         
-        foreach ($dll in $requiredRuntimes) {
-            $src = "$vsRedistDir\$dll"
-            $dest = "$outDir\$dll"
-            
-            if (Test-Path $src) {
-                Copy-Item -Force $src $dest
-                Write-Host "Copied $dll (Verified)"
-            } else {
-                # Fallback: check if underscore version exists without underscore in source (unlikely but safe)
-                $altName = $dll.Replace("_", "")
-                $altSrc = "$vsRedistDir\$altName"
-                if (Test-Path $altSrc) {
-                     Copy-Item -Force $altSrc $dest
-                     Write-Host "Copied $altName as $dll (Renamed fix)"
-                } else {
-                     Write-Warning "Critical: Could not find runtime $dll"
+        # Map of DesiredName -> PossibleSourceNames
+        # If source has no underscore, we copy it to the name WITH underscore.
+        $runtimeMap = @{
+            "vcruntime140.dll"   = @("vcruntime140.dll");
+            "vcruntime140_1.dll" = @("vcruntime140_1.dll", "vcruntime1401.dll");
+            "msvcp140.dll"       = @("msvcp140.dll");
+            "msvcp140_1.dll"     = @("msvcp140_1.dll", "msvcp1401.dll");
+            "msvcp140_2.dll"     = @("msvcp140_2.dll", "msvcp1402.dll")
+        }
+        
+        foreach ($key in $runtimeMap.Keys) {
+            $found = $false
+            foreach ($candidate in $runtimeMap[$key]) {
+                $srcPath = "$vsRedistDir\$candidate"
+                if (Test-Path $srcPath) {
+                    Copy-Item -Force $srcPath "$outDir\$key"
+                    Write-Host "Resolved $key from $candidate"
+                    $found = $true
+                    break
                 }
             }
+            if (-not $found) { Write-Warning "Could not find runtime for $key" }
         }
         
         # 4. Copy External Libs
@@ -303,11 +299,10 @@ jobs:
             if (Test-Path $src) { Copy-Item -Force $src $outDir }
         }
         
-        # CLEANUP
+        # CLEANUP & VERIFY
         Get-ChildItem -Path $outDir -Filter "*.pdb" -Recurse | Remove-Item -Force
         
-        # Final Verification
-        Write-Host "`nFinal DLL Check:"
+        Write-Host "`n--- FINAL DIRECTORY CONTENT (Proof for Installer) ---"
         Get-ChildItem -Path $outDir -Filter *.dll | Select-Object Name
 
     - name: Build Installer Package
