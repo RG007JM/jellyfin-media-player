@@ -18,9 +18,9 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Removed "Install Vulkan SDK" (Not needed for forced OpenGL)
-      # Removed "Download Ninja" (Pre-installed on windows-latest)
-      # Removed "pip install reuse" (Unnecessary for Release build)
+      # Removed "Install Vulkan SDK" (Optimization: Not needed for OpenGL)
+      # Removed "Download Ninja" (Optimization: Windows-latest has it)
+      # Removed "pip install reuse" (Optimization: Unnecessary)
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
@@ -66,10 +66,40 @@ jobs:
           Copy-Item "sdl_temp\SDL2-2.30.6\include\*" -Destination $incDir -Recurse
           Copy-Item "sdl_temp\SDL2-2.30.6\lib\x64\*" -Destination $libDir -Recurse
 
+      - name: Build ECM and MpvQt
+        shell: cmd
+        env:
+          CMAKE_PREFIX_PATH: ${{ env.GITHUB_WORKSPACE }}\dep-install;${{ env.Qt6_DIR }}
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          
+          :: --- 3. Extra CMake Modules (ECM) ---
+          cd "%GITHUB_WORKSPACE%"
+          git clone https://github.com/KDE/extra-cmake-modules.git -b v6.6.0
+          cd extra-cmake-modules
+          mkdir build
+          cd build
+          cmake -GNinja -DCMAKE_INSTALL_PREFIX="%GITHUB_WORKSPACE%\dep-install" -DBUILD_TESTING=OFF ..
+          ninja install
+          
+          :: --- 4. MpvQt ---
+          cd "%GITHUB_WORKSPACE%"
+          git clone https://github.com/KDE/mpvqt.git -b v1.0.0
+          cd mpvqt
+          mkdir build
+          cd build
+          cmake -GNinja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_PREFIX_PATH="%GITHUB_WORKSPACE%\dep-install;%Qt6_DIR%" ^
+            -DCMAKE_INSTALL_PREFIX="%GITHUB_WORKSPACE%\dep-install" ^
+            -DBUILD_TESTING=OFF ^
+            ..
+          ninja install
+
       - name: Patch main.cpp to Force OpenGL
         shell: powershell
         run: |
-          # FIX: Replaced complex regex with robust string injection to avoid syntax errors (0x60)
+          # This fixes the black screen issue by forcing OpenGL backend.
           $path = "src/main.cpp"
           $txt = Get-Content $path -Raw
           
@@ -83,7 +113,6 @@ jobs:
           $replacement = "QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);`r`n    QGuiApplication app"
           
           if ($txt -notmatch "setGraphicsApi") {
-              # Use standard .Replace() which is safer than -replace regex operator for C++ code
               $txt = $txt.Replace($search, $replacement)
               Set-Content -Path $path -Value $txt
               Write-Host "Successfully patched main.cpp"
@@ -117,12 +146,13 @@ jobs:
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           cd output
           
-          :: Run windeployqt to copy Qt DLLs
+          :: Run windeployqt
           windeployqt --release --qmldir ..\src\qml JellyfinDesktop.exe
           
-          :: Copy MPV and SDL dependencies manually
+          :: Copy MPV, SDL, and MpvQt dependencies
           copy "%GITHUB_WORKSPACE%\dep-install\lib\libmpv-2.dll" .
           copy "%GITHUB_WORKSPACE%\dep-install\lib\SDL2.dll" .
+          copy "%GITHUB_WORKSPACE%\dep-install\bin\MpvQt.dll" .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
