@@ -54,11 +54,17 @@ jobs:
         echo "C:\VulkanSDK\Bin" >> $env:GITHUB_PATH
         Remove-Item VulkanSDK.exe
 
-    - name: Prepare Libmpv (Stable 20240922)
+    - name: Prepare Libmpv (Stable 20240922 - Fixed URL)
       shell: pwsh
       run: |
-        $url = "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z/download"
-        Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -MaximumRedirection 5
+        # CHANGED: Using direct download link to avoid HTML page
+        $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z"
+        Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
+        
+        # Verify it is actually an archive (magic bytes '7z')
+        $bytes = Get-Content "mpv.7z" -Encoding Byte -TotalCount 2
+        if ($bytes[0] -ne 0x37 -or $bytes[1] -ne 0x7A) { throw "Download is not a valid 7z archive!" }
+
         7z x mpv.7z -ompv
         Set-Location mpv
         
