@@ -12,7 +12,7 @@ jobs:
 
     # Force OpenGL renderer (needed for QQuickFramebufferObject video path).
     env:
-      QSG_RHI_BACKEND: opengl
+      # QSG_RHI_BACKEND: opengl
       QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
 
     steps:
