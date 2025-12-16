@@ -10,7 +10,11 @@ jobs:
   build-win64:
     runs-on: windows-latest
     
+    # FORCE DIRECT3D 11
+    # We explicitly tell Qt to use the Direct3D 11 RHI backend.
+    # This bypasses OpenGL completely, which is what we want for the UI to work.
     env:
+      QSG_RHI_BACKEND: d3d11
       QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
 
     steps:
@@ -140,10 +144,8 @@ jobs:
         # 2. Patch src/core/ComponentManager.cpp - FIXING THE INCLUDE ERROR
         $compMgr = "src/core/ComponentManager.cpp"
         $compContent = Get-Content $compMgr -Raw
-        # Remove the includes
         $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*MprisComponent\.h.*$', '')
         $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*TaskbarComponent\.h.*$', '')
-        # Remove the registrations
         $compContent = [regex]::Replace($compContent, '(?mi)^.*MprisComponent.*$', '')
         $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
         Set-Content $compMgr $compContent -Encoding UTF8
@@ -243,7 +245,7 @@ jobs:
             }
         }
         
-        # 2. COPY WEBENGINE RESOURCES (Critical for UI)
+        # 2. COPY WEBENGINE RESOURCES
         Write-Host "Manually copying WebEngine Resources..."
         $resSrc = "$qtRoot/resources"
         if (Test-Path $resSrc) {
@@ -273,7 +275,15 @@ jobs:
         $redistDir = $runtimeDll.DirectoryName
         Copy-Item -Force "$redistDir\*.dll" $outDir
         
-        # 7. DIAGNOSTICS
+        # 7. REMOVE OPENGL SOFTWARE RASTERIZER (Critical for D3D11)
+        # We delete opengl32sw.dll to force Qt to use the System D3D11 Driver.
+        $swGl = "$outDir/opengl32sw.dll"
+        if (Test-Path $swGl) {
+            Write-Host "Removing $swGl to force Hardware Direct3D 11..."
+            Remove-Item -Force $swGl
+        }
+        
+        # 8. DIAGNOSTICS
         Write-Host "--- Content of Output Dir ---"
         Get-ChildItem $outDir | Select-Object Name
 
