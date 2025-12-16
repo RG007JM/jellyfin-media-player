@@ -10,9 +10,9 @@ jobs:
   build-win64:
     runs-on: windows-latest
 
-    env:
+    #env:
       #QSG_RHI_BACKEND: opengl
-      QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
+      #QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
 
     steps:
     - uses: actions/checkout@v4
