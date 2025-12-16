@@ -46,12 +46,14 @@ jobs:
         Copy-Item libmpv-2.dll ..\dep-install\bin\
 
     - name: Install Qt 6.10.1
+      id: qt
       uses: jurplel/install-qt-action@v4
       with:
         version: "6.10.1"
         target: "desktop"
         arch: "win64_msvc2022_64"
         modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning qtshadertools qtimageformats qtserialport"
+
 
     - name: Setup Build Environment
       shell: cmd
@@ -249,7 +251,8 @@ jobs:
         ) -join "`r`n"
         Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
+        $qt = '${{ steps.qt.outputs.qt_dir }}'
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$qt`" -DMpvQt_DIR=`"$mpvQtDir`" ."
         if ($LASTEXITCODE -ne 0) { exit 1 }
 
         Set-Location build
@@ -263,8 +266,10 @@ jobs:
         if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
 
         # Always use Qt from install-qt-action
-        $qtBin = Join-Path $env:Qt6_DIR "bin"
-        if (-not (Test-Path $qtBin)) { throw "Qt bin path not found: $qtBin" }
+        $qt = '${{ steps.qt.outputs.qt_dir }}'
+        $qtBin = Join-Path $qt "bin"
+        if (-not (Test-Path $qtBin)) { throw "Qt bin path not found: $qtBin (qt_dir=$qt)" }
+
 
         Write-Host "Detected Qt Bin Path: $qtBin"
         $qtRoot = Split-Path $qtBin -Parent
