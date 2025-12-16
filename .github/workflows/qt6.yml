@@ -409,7 +409,7 @@ jobs:
             'if(WIN32)'
             '  target_sources(jmp_core PRIVATE player/WindowsSmtc.cpp)'
             '  target_compile_features(jmp_core PRIVATE cxx_std_17)'
-            '  target_link_libraries(jmp_core PRIVATE runtimeobject)'
+            '  target_link_libraries(jmp_core runtimeobject)'
             'endif()'
             ''
           ) -join "`r`n"
