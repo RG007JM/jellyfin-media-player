@@ -227,96 +227,101 @@ jobs:
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
         Write-Host "Source patched (includes + GL compat)."
 
-    - name: Build Jellyfin Desktop
-      shell: pwsh
-      run: |
-        $root = (Get-Location).Path.Replace("\", "/")
-        $depInstall = "$root/dep-install"
-        $libMpv = "$depInstall/lib/libmpv.lib"
-        $incMpv = "$depInstall/include"
-        $mpvQtDir = "$depInstall/lib/cmake/MpvQt"
-        $installPrefix = "$root/output"
+      - name: Build Jellyfin Desktop
+        shell: pwsh
+        run: |
+          $root = (Get-Location).Path.Replace("\", "/")
+          $depInstall = "$root/dep-install"
+          $libMpv = "$depInstall/lib/libmpv.lib"
+          $incMpv = "$depInstall/include"
+          $mpvQtDir = "$depInstall/lib/cmake/MpvQt"
+          $installPrefix = "$root/output"
+      
+          $cmakeMod = "CMakeModules/FindMPV.cmake"
+          $overrideContent = @(
+            'set(MPV_FOUND TRUE)'
+            "set(MPV_INCLUDE_DIR `"$incMpv`")"
+            "set(MPV_LIBRARY `"$libMpv`")"
+            "set(MPV_LIBRARIES `"$libMpv`")"
+            "set(MPV_INCLUDE_DIRS `"$incMpv`")"
+            'if(NOT TARGET MPV::MPV)'
+            '  add_library(MPV::MPV UNKNOWN IMPORTED)'
+            "  set_target_properties(MPV::MPV PROPERTIES IMPORTED_LOCATION `"$libMpv`" INTERFACE_INCLUDE_DIRECTORIES `"$incMpv`")"
+            'endif()'
+          ) -join "`r`n"
+          Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
+      
+          # Use env set by install-qt-action (QT_ROOT_DIR is present in your logs)
+          $qtRootDir = $env:QT_ROOT_DIR
+          if (-not $qtRootDir) { throw "QT_ROOT_DIR is not set (install-qt-action env missing)" }
+      
+          cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$qtRootDir`" -DMpvQt_DIR=`"$mpvQtDir`" ."
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      
+          Set-Location build
+          cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
+      
+      - name: Deploy Qt and Finalize
+        shell: pwsh
+        run: |
+          $outDir = "$((Get-Location).Path)/output"
+          $depInstall = "$((Get-Location).Path)/dep-install"
+          if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
+      
+          # Always use Qt from install-qt-action
+          $qtRootDir = $env:QT_ROOT_DIR
+          if (-not $qtRootDir) { throw "QT_ROOT_DIR is not set (install-qt-action env missing)" }
+      
+          $qtBin = Join-Path $qtRootDir "bin"
+          if (-not (Test-Path $qtBin)) { throw "Qt bin path not found: $qtBin (QT_ROOT_DIR=$qtRootDir)" }
+      
+          Write-Host "Detected Qt Bin Path: $qtBin"
+          $qtRoot = Split-Path $qtBin -Parent
+      
+          Write-Host "Forcing Qt DLL copy..."
+          $qtDlls = @(
+            "Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Network.dll",
+            "Qt6Quick.dll","Qt6Qml.dll","Qt6Svg.dll","Qt6OpenGL.dll",
+            "Qt6QmlModels.dll","Qt6QmlWorkerScript.dll",
+            "Qt6WebEngineCore.dll","Qt6WebEngineQuick.dll"
+          )
+          foreach ($q in $qtDlls) {
+            $src = Join-Path $qtBin $q
+            if (Test-Path $src) { Copy-Item -Force $src $outDir } else { Write-Warning "Could not find $src" }
+          }
+      
+          Write-Host "Manually copying WebEngine Resources..."
+          $resSrc = Join-Path $qtRoot "resources"
+          if (Test-Path $resSrc) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $outDir "resources") | Out-Null
+            Copy-Item -Force -Recurse (Join-Path $resSrc "*") (Join-Path $outDir "resources")
+          }
+      
+          $processExe = Join-Path $qtBin "QtWebEngineProcess.exe"
+          if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
+      
+          Copy-Item -Force "$depInstall/bin/*.dll" $outDir
+      
+          $exePath = Join-Path $outDir "Jellyfin Desktop.exe"
+          $qmlArgs = @()
+          if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
+      
+          Write-Host "Running windeployqt..."
+          & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
+      
+          if (Test-Path "$outDir\qt.conf")  { Remove-Item -Force "$outDir\qt.conf" }
+          if (Test-Path "$outDir\.qt.conf") { Remove-Item -Force "$outDir\.qt.conf" }
+      
+          $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
+          $runtimeDll = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
+          if ($runtimeDll) {
+            $redistDir = $runtimeDll.DirectoryName
+            Copy-Item -Force "$redistDir\*.dll" $outDir
+          }
+      
+          Write-Host "--- Content of Output Dir ---"
+          Get-ChildItem $outDir | Select-Object Name
 
-        $cmakeMod = "CMakeModules/FindMPV.cmake"
-        $overrideContent = @(
-          'set(MPV_FOUND TRUE)'
-          "set(MPV_INCLUDE_DIR `"$incMpv`")"
-          "set(MPV_LIBRARY `"$libMpv`")"
-          "set(MPV_LIBRARIES `"$libMpv`")"
-          "set(MPV_INCLUDE_DIRS `"$incMpv`")"
-          'if(NOT TARGET MPV::MPV)'
-          '  add_library(MPV::MPV UNKNOWN IMPORTED)'
-          "  set_target_properties(MPV::MPV PROPERTIES IMPORTED_LOCATION `"$libMpv`" INTERFACE_INCLUDE_DIRECTORIES `"$incMpv`")"
-          'endif()'
-        ) -join "`r`n"
-        Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
-
-        $qt = '${{ steps.qt.outputs.qt_dir }}'
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$qt`" -DMpvQt_DIR=`"$mpvQtDir`" ."
-        if ($LASTEXITCODE -ne 0) { exit 1 }
-
-        Set-Location build
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
-
-    - name: Deploy Qt and Finalize
-      shell: pwsh
-      run: |
-        $outDir = "$((Get-Location).Path)/output"
-        $depInstall = "$((Get-Location).Path)/dep-install"
-        if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
-
-        # Always use Qt from install-qt-action
-        $qt = '${{ steps.qt.outputs.qt_dir }}'
-        $qtBin = Join-Path $qt "bin"
-        if (-not (Test-Path $qtBin)) { throw "Qt bin path not found: $qtBin (qt_dir=$qt)" }
-
-
-        Write-Host "Detected Qt Bin Path: $qtBin"
-        $qtRoot = Split-Path $qtBin -Parent
-
-        Write-Host "Forcing Qt DLL copy..."
-        $qtDlls = @(
-          "Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Network.dll",
-          "Qt6Quick.dll","Qt6Qml.dll","Qt6Svg.dll","Qt6OpenGL.dll",
-          "Qt6QmlModels.dll","Qt6QmlWorkerScript.dll",
-          "Qt6WebEngineCore.dll","Qt6WebEngineQuick.dll"
-        )
-        foreach ($q in $qtDlls) {
-          $src = Join-Path $qtBin $q
-          if (Test-Path $src) { Copy-Item -Force $src $outDir } else { Write-Warning "Could not find $src" }
-        }
-
-        Write-Host "Manually copying WebEngine Resources..."
-        $resSrc = Join-Path $qtRoot "resources"
-        if (Test-Path $resSrc) {
-          New-Item -ItemType Directory -Force -Path (Join-Path $outDir "resources") | Out-Null
-          Copy-Item -Force -Recurse (Join-Path $resSrc "*") (Join-Path $outDir "resources")
-        }
-
-        $processExe = Join-Path $qtBin "QtWebEngineProcess.exe"
-        if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
-
-        Copy-Item -Force "$depInstall/bin/*.dll" $outDir
-
-        $exePath = Join-Path $outDir "Jellyfin Desktop.exe"
-        $qmlArgs = @()
-        if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
-
-        Write-Host "Running windeployqt..."
-        & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
-
-        if (Test-Path "$outDir\qt.conf")  { Remove-Item -Force "$outDir\qt.conf" }
-        if (Test-Path "$outDir\.qt.conf") { Remove-Item -Force "$outDir\.qt.conf" }
-
-        $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
-        $runtimeDll = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
-        if ($runtimeDll) {
-          $redistDir = $runtimeDll.DirectoryName
-          Copy-Item -Force "$redistDir\*.dll" $outDir
-        }
-
-        Write-Host "--- Content of Output Dir ---"
-        Get-ChildItem $outDir | Select-Object Name
 
     - name: Create Portable Zip
       shell: pwsh
