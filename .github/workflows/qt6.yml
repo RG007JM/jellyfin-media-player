@@ -213,28 +213,42 @@ jobs:
             Set-Content $main $m -Encoding UTF8
           }
         }
-        # 6) Remove qt.conf resource copy/install block from src/CMakeLists.txt
-        $cmakeFile = "src/CMakeLists.txt"
-        if (Test-Path $cmakeFile) {
-          $c = Get-Content $cmakeFile -Raw -Encoding UTF8
+        # 6) Remove qt.conf install + generation (required if qt.conf is deleted everywhere)
+        $filesToPatch = @(
+          "CMakeModules/CPackConfiguration.cmake",
+          "CMakeModules/QtConfiguration.cmake"
+        )
         
-          # Remove the whole block that references qt.conf via ${QTROOT}/bin/qt.conf
-          $pattern = '(?ms)^[ \t]*#\s*copy\s+the\s+qt\.conf.*?\r?\n[ \t]*if\s*\(\s*EXISTS\s*\$\{QTROOT\}/bin/qt\.conf\s*\)\s*\r?\n.*?\r?\n[ \t]*endif\s*\(\s*\)\s*\r?\n?'
-          $c2 = [regex]::Replace($c, $pattern, '')
+        foreach ($f in $filesToPatch) {
+          if (-not (Test-Path $f)) { continue }
         
-          # Fallback: if the comment text changes, still remove any if(...) block that contains /bin/qt.conf and add_resources
-          if ($c2 -eq $c) {
-            $pattern2 = '(?ms)^[ \t]*if\s*\(\s*EXISTS\s*\$\{QTROOT\}/bin/qt\.conf\s*\)\s*\r?\n.*?add_resources\s*\([^\)]*?\$\{QTROOT\}/bin/qt\.conf[^\)]*?\)\s*\r?\n.*?^[ \t]*endif\s*\(\s*\)\s*\r?\n?'
-            $c2 = [regex]::Replace($c, $pattern2, '')
-          }
+          $t = Get-Content $f -Raw -Encoding UTF8
+          $orig = $t
         
-          if ($c2 -ne $c) {
-            Set-Content -Path $cmakeFile -Value $c2 -Encoding UTF8
-            Write-Host "Removed qt.conf handling from $cmakeFile"
+          # Remove the CPack install rule that installs bundle/win/qt.conf
+          $t = [regex]::Replace($t,
+            '(?mi)^\s*install\s*\(\s*FILES\s+\$\{CMAKE_SOURCE_DIR\}/bundle/win/qt\.conf\s+DESTINATION\s+\.\s*\)\s*$',
+            '# (CI patch) qt.conf disabled: install(FILES ${CMAKE_SOURCE_DIR}/bundle/win/qt.conf DESTINATION .)'
+          )
+        
+          # Remove/disable the QtConfiguration rule that writes qt.conf into QTROOT/bin
+          $t = [regex]::Replace($t,
+            '(?mi)^\s*file\s*\(\s*WRITE\s+\$\{QTROOT\}/bin/qt\.conf\s+\$\{QTCONFCONTENT\}\s*\)\s*$',
+            '# (CI patch) qt.conf disabled: file(WRITE ${QTROOT}/bin/qt.conf ${QTCONFCONTENT})'
+          )
+        
+          if ($t -ne $orig) {
+            Set-Content -Path $f -Value $t -Encoding UTF8
+            Write-Host "Patched $f to disable qt.conf"
           } else {
-            Write-Host "qt.conf block not found in $cmakeFile (nothing to remove)"
+            Write-Host "No qt.conf rule matched in $f (nothing changed)"
           }
         }
+        
+        # 7) Remove the actual file from the repo tree (optional but matches 'remove everywhere')
+        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
+        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
+
 
         Write-Host "Source patched (includes + GL compat)."
 
@@ -265,12 +279,9 @@ jobs:
 
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
         if ($LASTEXITCODE -ne 0) { exit 1 }
-        # Find where bundle/win/qt.conf is referenced (so we can patch the right place)
-        Write-Host "Searching for qt.conf references..."
-        $hits = Select-String -Path ".\**\CMakeLists.txt",".\**\*.cmake" -Pattern "qt\.conf","bundle/win/qt\.conf","QTROOT}/bin/qt\.conf" -SimpleMatch:$false -ErrorAction SilentlyContinue
-        $hits | ForEach-Object { "{0}:{1}: {2}" -f $_.Path,$_.LineNumber,$_.Line.Trim() } | Out-Host
-                Set-Location build
-                cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
+        
+        Set-Location build
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
 
     - name: Deploy Qt and Finalize
       shell: pwsh
