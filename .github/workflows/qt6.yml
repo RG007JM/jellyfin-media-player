@@ -250,6 +250,56 @@ jobs:
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
 
 
+        # 8) HDR/SDR: apply sane SDR defaults automatically (before manual otherconf)
+        # Patch src/player/PlayerComponent.cpp :: setOtherConfiguration()
+        
+        $pc = "src/player/PlayerComponent.cpp"
+        if (-not (Test-Path $pc)) {
+          throw "Cannot patch HDR defaults: missing $pc"
+        }
+        
+        $src = Get-Content $pc -Raw -Encoding UTF8
+        $orig = $src
+        
+        # Inject defaults at the top of setOtherConfiguration(), right after the mmpv null-check.
+        # This keeps it idempotent by checking for a marker comment.
+        if ($src -notmatch "CI PATCH: SDR tonemap defaults") {
+        
+          $needle = 'void\s+PlayerComponent::setOtherConfiguration\s*\(\s*\)\s*\{\s*(?:\r?\n)+\s*QString\s+otherConfiguration'
+          if ($src -notmatch $needle) {
+            throw "Cannot find setOtherConfiguration() header/first line layout to patch"
+          }
+        
+          # Insert block immediately before "QString otherConfiguration = ..."
+          $insert = @'
+            // CI PATCH: SDR tonemap defaults (fix washed-out HDR on SDR displays)
+            // NOTE: Proper HDR display detection should disable these on HDR output.
+            // For now this improves SDR behavior out-of-the-box; manual config still overrides below.
+            if (mmpv) {
+              mmpv->setProperty("profile", "high-quality");
+              mmpv->setProperty("tone-mapping", "bt.2390");
+              mmpv->setProperty("gamut-mapping-mode", "clip");
+            }
+        
+        '@
+        
+          $src = [regex]::Replace(
+            $src,
+            '(void\s+PlayerComponent::setOtherConfiguration\s*\(\s*\)\s*\{\s*(?:\r?\n)+\s*)(QString\s+otherConfiguration)',
+            "`$1$insert`$2",
+            1
+          )
+        }
+        
+        if ($src -ne $orig) {
+          Set-Content -Path $pc -Value $src -Encoding UTF8
+          Write-Host "Patched HDR->SDR defaults into $pc"
+        } else {
+          Write-Host "HDR patch already present (or no changes needed)"
+        }
+
+
+
         Write-Host "Source patched (includes + GL compat)."
 
     - name: Build Jellyfin Desktop
