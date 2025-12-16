@@ -10,10 +10,11 @@ jobs:
   build-win64:
     runs-on: windows-latest
     
-    # FORCE OPENGL AT RUNTIME (Safety Net for MpvQt/Black Screen)
+    # CRITICAL: Force the entire stack (Qt, RHI, WebEngine) to align on OpenGL
     env:
       QSG_RHI_BACKEND: opengl
       QT_OPENGL: desktop
+      QTWEBENGINE_CHROMIUM_FLAGS: "--use-gl=desktop"
 
     steps:
     - uses: actions/checkout@v4
@@ -27,14 +28,15 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
-    - name: Prepare Libmpv (Stable 20240922 - Fixed URL)
+    - name: Prepare Libmpv (User Provided v3 URL)
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Force -Path "dep-install/bin", "dep-install/lib", "dep-install/include"
         
-        # Exact URL provided by user
+        # EXACT URL provided by user
         $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z"
-        # Increased maximum redirection and added UserAgent to help with SourceForge
+        
+        # Increased maximum redirection and added UserAgent to handle SourceForge mirrors
         Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 10
         
         7z x mpv.7z -ompv
@@ -162,19 +164,32 @@ jobs:
         $c = '#include <windows.h>' + [Environment]::NewLine + $c
         Set-Content $codecs $c -Encoding UTF8
         
-        # 5. FORCE OPENGL PATCH (Safe String Replace - No Syntax Error)
+        # 5. FORCE OPENGL & CONTEXT SHARING (The "Black Screen" Fix)
         $mainFile = "src/main.cpp"
         $txt = Get-Content $mainFile -Raw
+        
+        # Ensure Headers
         if ($txt -notmatch "#include <QQuickWindow>") {
             $txt = "#include <QQuickWindow>`r`n" + $txt
         }
+        
+        # Inject the Fixes before QGuiApplication
+        # 1. Force WebEngine to Desktop GL to match MpvQt
+        # 2. Enable Shared OpenGL Contexts (Required for MpvQt)
+        # 3. Force RHI to OpenGL
         $search = "QGuiApplication app"
-        $replacement = "QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);`r`n    QGuiApplication app"
+        $replacement = @"
+        qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--use-gl=desktop");
+            QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+            QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+            QGuiApplication app
+        "@
+        
         if ($txt -notmatch "setGraphicsApi") {
-            # Use .Replace() to avoid regex backtick issues
-            $txt = $txt.Replace($search, $replacement)
+            # Use .Replace() to be safe
+            $txt = $txt.Replace("QGuiApplication app", $replacement)
             Set-Content -Path $mainFile -Value $txt
-            Write-Host "Patched main.cpp to force OpenGL."
+            Write-Host "Patched main.cpp with Context Sharing and WebEngine Flags."
         }
         
         # 6. Delete directories
