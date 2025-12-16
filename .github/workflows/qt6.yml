@@ -1,53 +1,19 @@
-name: Build Qt6 Windows x64
-
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - qt6
+name: build
+on: workflow_dispatch
 
 jobs:
   build-win64:
     runs-on: windows-latest
-    
-    # FORCE DIRECT3D 11
-    # We explicitly tell Qt to use the Direct3D 11 RHI backend.
-    # This bypasses OpenGL completely, which is what we want for the UI to work.
+
+    # 1. CRITICAL FIX: Force OpenGL backend.
+    # The application uses QQuickFramebufferObject which REQUIRES OpenGL.
+    # Windows defaults to Direct3D 11 in Qt6, which breaks this specific renderer.
     env:
-      QSG_RHI_BACKEND: d3d11
-      QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
+      QSG_RHI_BACKEND: opengl
+      QTWEBENGINE_CHROMIUM_FLAGS: --no-sandbox
 
     steps:
     - uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Nuke MinGW and Path Contamination
-      shell: pwsh
-      run: |
-        $path = $env:Path -split ';' | Where-Object { $_ -notmatch 'mingw' -and $_ -notmatch 'strawberry' }
-        [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
-        echo "Cleaned Path: $env:Path"
-
-    - name: Prepare Libmpv (User Provided v3 URL)
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Force -Path "dep-install/bin", "dep-install/lib", "dep-install/include"
-        
-        $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z"
-        Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 10
-        
-        7z x mpv.7z -ompv
-        Set-Location mpv
-        
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /exports libmpv-2.dll > exports.txt"
-        $defContent = @("LIBRARY libmpv-2.dll", "EXPORTS") + (Get-Content exports.txt | ForEach-Object { if ($_ -match "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)") { $matches[1] } })
-        $defContent | Set-Content libmpv-2.def
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
-        
-        Copy-Item -Recurse -Force include\* ..\dep-install\include\
-        Copy-Item libmpv.lib ..\dep-install\lib\
-        Copy-Item libmpv-2.dll ..\dep-install\bin\
 
     - name: Install Qt 6.8.0
       uses: jurplel/install-qt-action@v4
@@ -56,257 +22,87 @@ jobs:
         arch: "win64_msvc2022_64"
         modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning qtshadertools qt5compat qtimageformats qtserialport"
 
-    - name: Setup Build Environment
-      shell: cmd
+    - name: Install dependencies (mpv, ninja, stage VC++ redist)
+      shell: bash
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        if not exist dep-install\bin mkdir dep-install\bin
-        if not exist dep-install\include mkdir dep-install\include
-        if not exist dep-install\lib mkdir dep-install\lib
+        set -e
+        mkdir -p build
+        # VC++ Redistributable
+        curl -L https://aka.ms/vs/17/release/vc_redist.x64.exe -o vc_redist.x64.exe
+        mkdir -p bundle/win
+        cp vc_redist.x64.exe bundle/win/vcredist_x64.exe
         
+        # Ninja
         curl -L https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip -o ninja.zip
-        tar -xf ninja.zip -C dep-install\bin
-        del ninja.zip
+        unzip -o ninja.zip
+        mv -f ninja.exe build/
         
-        echo %GITHUB_WORKSPACE%\dep-install\bin>> %GITHUB_PATH%
-        pip install reuse
+        # 2. UPDATED MPV VERSION (Guaranteed working version 2025-11-16)
+        curl -L "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20251116-git-701201b.7z/download" -o mpv.7z
+        7z x mpv.7z
+        mkdir -p mpv
+        mv include mpv
+        # Generate lib/def for MSVC linkage
+        gendef libmpv-2.dll
+        mv libmpv-2.dll mpv/libmpv-2.dll
+        mv libmpv-2.def mpv.def
+        mv mpv.def libmpv.dll.a mpv/
+        mv mpv build/
 
-    - name: Prepare SDL2
-      shell: pwsh
-      run: |
-        Invoke-WebRequest -Uri "https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip" -OutFile "sdl2.zip"
-        Expand-Archive "sdl2.zip" -DestinationPath "sdl2-temp" -Force
-        $root = (Get-ChildItem "sdl2-temp" | Select-Object -First 1).FullName
-        Copy-Item -Recurse -Force "$root\include\*" "dep-install\include\"
-        Copy-Item -Force "$root\lib\x64\SDL2.lib" "dep-install\lib\"
-        Copy-Item -Force "$root\lib\x64\SDL2main.lib" "dep-install\lib\"
-        Copy-Item -Force "$root\lib\x64\SDL2.dll" "dep-install\bin\"
-
-    - name: Prepare ECM and MpvQt
-      shell: cmd
-      run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        set "INSTALL_DIR=%GITHUB_WORKSPACE%\dep-install"
-        set "INSTALL_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
-        set "INCLUDE_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install/include"
-        
-        git clone https://github.com/KDE/extra-cmake-modules.git
-        cd extra-cmake-modules
-        cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
-        ninja -C build install
-        cd ..
-        
-        git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
-        cd mpvqt
-        
-        powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
-        echo. >> src\mpvcontroller.cpp
-        echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
-        
-        cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" -DCMAKE_CXX_FLAGS="-I\"%INCLUDE_DIR_FWD%\""
-        ninja -C build install
-        cd ..
-
-    - name: Download & Stage VC++ Redist and OpenSSL
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Force -Path bundle/win
-        Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "bundle/win/vcredist_x64.exe"
-        
-        Invoke-WebRequest -Uri "https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-3.6.0.zip" -OutFile "openssl.zip"
-        Expand-Archive "openssl.zip" -DestinationPath "openssl-temp" -Force
-        $binPath = (Get-ChildItem -Path "openssl-temp" -Recurse -Filter "libssl-3-x64.dll" | Select-Object -First 1).DirectoryName
-        Copy-Item "$binPath\libssl-3-x64.dll" "dep-install\bin\"
-        Copy-Item "$binPath\libcrypto-3-x64.dll" "dep-install\bin\"
-
-    - name: Patch WiX Bundle.wxs
+    - name: Patch WiX Bundle.wxs redist path
       shell: pwsh
       run: |
         $bundle  = "bundle/win/Bundle.wxs"
-        if (Test-Path $bundle) {
-            $c = Get-Content -Raw $bundle -Encoding UTF8
-            $c = $c -replace 'Source=".*vcredist_x64.exe"', 'Source="bundle\win\vcredist_x64.exe"'
-            $c = [regex]::Replace($c, 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe', 'vcredist_x64.exe')
-            Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
+        $content = Get-Content -Raw $bundle -Encoding UTF8
+        $pattern = 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe'
+        $patched = [regex]::Replace($content, $pattern, 'vcredist_x64.exe')
+        Set-Content -LiteralPath $bundle -Value $patched -Encoding UTF8
+        if (-not (Select-String -Path $bundle -SimpleMatch -Pattern "vcredist_x64.exe")) {
+          throw "Bundle patch failed: vcredist_x64.exe not found in Bundle.wxs"
         }
 
-    - name: Patch Source Code (Include Fix + Dummy Video)
-      shell: pwsh
-      run: |
-        # 1. Patch src/CMakeLists.txt
-        $cmakeFile = "src/CMakeLists.txt"
-        $content = Get-Content $cmakeFile -Raw
-        $content = [regex]::Replace($content, '(?mi)^.*mpris.*$', '')
-        $content = [regex]::Replace($content, '(?mi)^.*taskbar.*$', '')
-        $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
-        Set-Content $cmakeFile $content -Encoding UTF8
-        
-        # 2. Patch src/core/ComponentManager.cpp - FIXING THE INCLUDE ERROR
-        $compMgr = "src/core/ComponentManager.cpp"
-        $compContent = Get-Content $compMgr -Raw
-        $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*MprisComponent\.h.*$', '')
-        $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*TaskbarComponent\.h.*$', '')
-        $compContent = [regex]::Replace($compContent, '(?mi)^.*MprisComponent.*$', '')
-        $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
-        Set-Content $compMgr $compContent -Encoding UTF8
-        
-        # 3. Patch src/ui/WindowManager.cpp
-        $winMgr = "src/ui/WindowManager.cpp"
-        if (Test-Path $winMgr) {
-            $winContent = Get-Content $winMgr -Raw
-            $winContent = [regex]::Replace($winContent, '(?mi)^.*TaskbarComponent.*$', '')
-            Set-Content $winMgr $winContent -Encoding UTF8
-        }
-        
-        # 4. CodecsComponent.cpp patch
-        $codecs = "src/player/CodecsComponent.cpp"
-        $c = Get-Content $codecs -Raw
-        $c = '#include <windows.h>' + [Environment]::NewLine + $c
-        Set-Content $codecs $c -Encoding UTF8
-        
-        # 5. MpvVideoItem Dummy Patch (For D3D11 Compatibility)
-        $header = "src/player/MpvVideoItem.h"
-        $htxt = Get-Content $header -Raw
-        $htxt = $htxt.Replace("QQuickFramebufferObject", "QQuickItem")
-        $htxt = $htxt.Replace("#include <QQuickFramebufferObject>", "#include <QQuickItem>")
-        $htxt = $htxt.Replace("Renderer *createRenderer()", "// Renderer *createRenderer()")
-        Set-Content $header $htxt
-        
-        $cpp = "src/player/MpvVideoItem.cpp"
-        $ctxt = Get-Content $cpp -Raw
-        $ctxt = $ctxt.Replace("MpvVideoItem::Renderer *MpvVideoItem::createRenderer()", "void *MpvVideoItem__createRenderer_disabled()")
-        Set-Content $cpp $ctxt
+    # (Optional) OpenSSL caching steps can remain here if you wish...
 
-        Write-Host "Source patched: Mpris/Taskbar includes removed + MpvVideoItem dummy applied."
-
-    - name: Build Jellyfin Desktop
-      shell: pwsh
-      run: |
-        $root = (Get-Location).Path.Replace("\", "/")
-        $depInstall = "$root/dep-install"
-        $libMpv = "$depInstall/lib/libmpv.lib"
-        $incMpv = "$depInstall/include"
-        $mpvQtDir = "$depInstall/lib/cmake/MpvQt"
-        $installPrefix = "$root/output"
-        # --- OVERRIDE FindMPV.cmake ---
-        $cmakeMod = "CMakeModules/FindMPV.cmake"
-        $overrideContent = @"
-        set(MPV_FOUND TRUE)
-        set(MPV_INCLUDE_DIR "$incMpv")
-        set(MPV_LIBRARY "$libMpv")
-        set(MPV_LIBRARIES "$libMpv")
-        set(MPV_INCLUDE_DIRS "$incMpv")
-        if(NOT TARGET MPV::MPV)
-          add_library(MPV::MPV UNKNOWN IMPORTED)
-          set_target_properties(MPV::MPV PROPERTIES IMPORTED_LOCATION "$libMpv" INTERFACE_INCLUDE_DIRECTORIES "$incMpv")
-        endif()
-        "@
-        Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
-        # --- CMAKE & NINJA ---
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
-        if ($LASTEXITCODE -ne 0) { exit 1 }
-        
-        Set-Location build
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
-
-    - name: Deploy Qt and Finalize
-      shell: pwsh
-      run: |
-        $outDir = "$((Get-Location).Path)/output"
-        $depInstall = "$((Get-Location).Path)/dep-install"
-        
-        if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
-        
-        # --- FIX: Locate Qt Binaries Correctly ---
-        # 1. Try environment variables
-        $qtBin = $env:Qt6_DIR + "/bin"
-        if (-not (Test-Path $qtBin)) {
-            # 2. Try locating windeployqt
-            $windeploy = Get-Command windeployqt -ErrorAction SilentlyContinue
-            if ($windeploy) {
-                $qtBin = $windeploy.Source | Split-Path | Split-Path
-                $qtBin = "$qtBin/bin"
-            } else {
-                $qtBin = "D:/a/jellyfin-media-player/Qt/6.8.0/msvc2022_64/bin"
-            }
-        }
-        Write-Host "Detected Qt Bin Path: $qtBin"
-        $qtRoot = Split-Path $qtBin -Parent
-        
-        # 1. PRE-COPY QT DLLS
-        Write-Host "Forcing Qt DLL copy..."
-        $qtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll", "Qt6WebEngineCore.dll", "Qt6WebEngineQuick.dll")
-        foreach ($q in $qtDlls) {
-            $src = "$qtBin\$q"
-            if (Test-Path $src) {
-                Copy-Item -Force $src $outDir
-            } else {
-                Write-Warning "Could not find $src to copy."
-            }
-        }
-        
-        # 2. COPY WEBENGINE RESOURCES
-        Write-Host "Manually copying WebEngine Resources..."
-        $resSrc = "$qtRoot/resources"
-        if (Test-Path $resSrc) {
-            Copy-Item -Force -Recurse "$resSrc\*" $outDir
-            New-Item -ItemType Directory -Force -Path "$outDir/resources"
-            Copy-Item -Force -Recurse "$resSrc\*" "$outDir/resources"
-        }
-        
-        # 3. COPY WEBENGINE PROCESS
-        $processExe = "$qtBin\QtWebEngineProcess.exe"
-        if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
-        
-        # 4. COPY DEPENDENCIES
-        Copy-Item -Force "$depInstall/bin/*.dll" $outDir
-        
-        # 5. WINDEPLOYQT
-        $exePath = "$outDir/Jellyfin Desktop.exe"
-        $qmlArgs = @()
-        if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
-        
-        Write-Host "Running windeployqt..."
-        & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
-            
-        # 6. VCRUNTIME (Manual)
-        $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
-        $runtimeDll = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
-        $redistDir = $runtimeDll.DirectoryName
-        Copy-Item -Force "$redistDir\*.dll" $outDir
-        
-        # 7. REMOVE OPENGL SOFTWARE RASTERIZER (Critical for D3D11)
-        # We delete opengl32sw.dll to force Qt to use the System D3D11 Driver.
-        $swGl = "$outDir/opengl32sw.dll"
-        if (Test-Path $swGl) {
-            Write-Host "Removing $swGl to force Hardware Direct3D 11..."
-            Remove-Item -Force $swGl
-        }
-        
-        # 8. DIAGNOSTICS
-        Write-Host "--- Content of Output Dir ---"
-        Get-ChildItem $outDir | Select-Object Name
-
-    - name: Create Portable Zip
-      shell: pwsh
-      run: Compress-Archive -Path output\* -DestinationPath Jellyfin-Desktop-Portable.zip
-
-    - name: Upload Portable Zip
-      uses: actions/upload-artifact@v4
-      with:
-        name: jellyfin-desktop-portable
-        path: Jellyfin-Desktop-Portable.zip
-
-    - name: Build Installer Package
+    - name: Build
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
         cd build
+        
+        rem Setup WiX
+        set WIXBIN=C:\Program Files (x86)\WiX Toolset v3.14\bin
+        if not exist "%WIXBIN%\light.exe" set WIXBIN=C:\Program Files (x86)\WiX Toolset v3.11\bin
+        set PATH=%PATH%;%WIXBIN%;%CD%
+        
+        rem Configure with CMake
+        cmake -GNinja ^
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
+          -DCMAKE_INSTALL_PREFIX=output ^
+          -DCMAKE_MAKE_PROGRAM=ninja.exe ^
+          -DQTROOT=%Qt6_DIR% ^
+          -DMPV_INCLUDE_DIR=mpv/include ^
+          -DMPV_LIBRARY=mpv/libmpv-2.dll ^
+          ..
+        
+        rem Link MPV
+        lib /def:mpv\mpv.def /out:mpv\libmpv-2.dll.lib /MACHINE:X64
+        
+        rem Build and Install
+        ninja
+        ninja install
+        
+        rem Deploy Qt Dependencies
+        for %%I in ("%Qt6_DIR%\..\..") do set QTBIN=%%~fI\bin
+        %QTBIN%\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
+        
+        rem 3. CRITICAL: DO NOT REMOVE opengl32sw.dll
+        rem Previous script removed it here. Keeping it ensures fallback for black screen issues.
+
+        rem Package MSI/EXE
         ninja windows_package
 
     - name: Archive installer
       uses: actions/upload-artifact@v4
       with:
-        name: jellyfin-desktop-windows
-        path: build/JellyfinDesktop-*.exe
+        name: windows
+        path: ${{ github.workspace }}/build/JellyfinMediaPlayer-*.exe
