@@ -158,17 +158,25 @@ jobs:
         "@
         Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
-        # --- PATCH 1: CodecsComponent.cpp ---
+        # --- PATCHES ---
         $f='src/player/CodecsComponent.cpp'
         $c=Get-Content $f -Raw
         $c='#include <windows.h>' + [Environment]::NewLine + $c
         Set-Content $f $c
         
-        # --- PATCH 2: Remove Qt6::DBus from CMakeLists.txt (Fix for Windows Build) ---
+        # --- PATCH: REMOVE MPRIS (DBUS) FOR WINDOWS ---
         $cm='src/CMakeLists.txt'
         $txt=Get-Content $cm -Raw
-        $txt=$txt -replace 'Qt6::DBus', ''
+        $txt=$txt -replace 'Qt6::DBus', '' 
+        $txt=$txt -replace 'mpris/MprisComponent.cpp', ''
+        $txt=$txt -replace 'mpris/MprisComponent.h', ''
         Set-Content $cm $txt
+        
+        $mgr='src/core/ComponentManager.cpp'
+        $mtxt=Get-Content $mgr -Raw
+        $mtxt=$mtxt -replace '#include "mpris/MprisComponent.h"', '// #include "mpris/MprisComponent.h"'
+        $mtxt=$mtxt -replace 'addComponent\(new MprisComponent\(this\)\);', '// addComponent(new MprisComponent(this));'
+        Set-Content $mgr $mtxt
 
         # --- CMAKE & NINJA ---
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
