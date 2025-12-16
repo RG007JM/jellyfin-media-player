@@ -9,6 +9,11 @@ on:
 jobs:
   build-win64:
     runs-on: windows-latest
+    
+    # FORCE OPENGL AT RUNTIME (Safety Net)
+    env:
+      QSG_RHI_BACKEND: opengl
+      QT_OPENGL: desktop
 
     steps:
     - uses: actions/checkout@v4
@@ -22,12 +27,13 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
-    - name: Prepare Libmpv (Stable 20240922 - Fixed URL)
+    - name: Prepare Libmpv (Generic x86_64 - Stable)
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Force -Path "dep-install/bin", "dep-install/lib", "dep-install/include"
         
-        $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z"
+        # Switched to GENERIC x86_64 (Non-v3) to ensure compatibility with all CPUs and drivers
+        $url = "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-20240922-git-560413a.7z/download"
         Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
         
         7z x mpv.7z -ompv
@@ -123,10 +129,10 @@ jobs:
             Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (MPRIS, Taskbar, Tests, Force D3D11)
+    - name: Patch Source Code (MPRIS, Taskbar, Tests, Force OpenGL)
       shell: pwsh
       run: |
-        # 1. Patch src/CMakeLists.txt - Remove MPRIS, DBus, and Taskbar
+        # 1. Patch src/CMakeLists.txt
         $cmakeFile = "src/CMakeLists.txt"
         $content = Get-Content $cmakeFile -Raw
         $content = [regex]::Replace($content, '(?mi)^.*mpris.*$', '')
@@ -134,14 +140,14 @@ jobs:
         $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
         Set-Content $cmakeFile $content -Encoding UTF8
         
-        # 2. Patch src/core/ComponentManager.cpp - Remove MPRIS and Taskbar instantiation
+        # 2. Patch src/core/ComponentManager.cpp
         $compMgr = "src/core/ComponentManager.cpp"
         $compContent = Get-Content $compMgr -Raw
         $compContent = [regex]::Replace($compContent, '(?mi)^.*MprisComponent.*$', '')
         $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
         Set-Content $compMgr $compContent -Encoding UTF8
         
-        # 3. Patch src/ui/WindowManager.cpp - Remove taskbar usage
+        # 3. Patch src/ui/WindowManager.cpp
         $winMgr = "src/ui/WindowManager.cpp"
         if (Test-Path $winMgr) {
             $winContent = Get-Content $winMgr -Raw
@@ -149,27 +155,29 @@ jobs:
             Set-Content $winMgr $winContent -Encoding UTF8
         }
         
-        # 4. CodecsComponent.cpp patch (existing)
+        # 4. CodecsComponent.cpp patch
         $codecs = "src/player/CodecsComponent.cpp"
         $c = Get-Content $codecs -Raw
         $c = '#include <windows.h>' + [Environment]::NewLine + $c
         Set-Content $codecs $c -Encoding UTF8
         
-        # 5. Force Direct3D 11 (Better stability than OpenGL on Windows)
+        # 5. FORCE OPENGL PATCH (Correct Syntax)
+        # This is CRITICAL. MpvQt v1.0.0 DOES NOT WORK without this.
         $mainFile = "src/main.cpp"
         $txt = Get-Content $mainFile -Raw
         if ($txt -notmatch "#include <QQuickWindow>") {
             $txt = "#include <QQuickWindow>`r`n" + $txt
         }
         $search = "QGuiApplication app"
-        $replacement = "QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D11);`r`n    QGuiApplication app"
+        $replacement = "QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);`r`n    QGuiApplication app"
         if ($txt -notmatch "setGraphicsApi") {
+            # Use .Replace() to avoid the '0x60' syntax error from before
             $txt = $txt.Replace($search, $replacement)
             Set-Content -Path $mainFile -Value $txt
-            Write-Host "Patched main.cpp to force Direct3D11."
+            Write-Host "Patched main.cpp to force OpenGL."
         }
         
-        # 6. Delete directories to ensure they aren't compiled
+        # 6. Delete directories
         if (Test-Path "src/mpris") { Remove-Item -Path "src/mpris" -Recurse -Force }
         if (Test-Path "src/taskbar") { Remove-Item -Path "src/taskbar" -Recurse -Force }
 
@@ -221,13 +229,12 @@ jobs:
                 $qtBin = $windeploy.Source | Split-Path | Split-Path
                 $qtBin = "$qtBin/bin"
             } else {
-                # 3. Fallback to hardcoded assumption if all else fails (dangerous but often correct for this runner)
                 $qtBin = "D:/a/jellyfin-media-player/Qt/6.8.0/msvc2022_64/bin"
             }
         }
         Write-Host "Detected Qt Bin Path: $qtBin"
         if (-not (Test-Path $qtBin)) { throw "Could not locate Qt Binaries at $qtBin" }
-        # 1. PRE-COPY QT DLLS (Brute Force)
+        # 1. PRE-COPY QT DLLS
         Write-Host "Forcing Qt DLL copy..."
         $qtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll")
         foreach ($q in $qtDlls) {
@@ -240,13 +247,12 @@ jobs:
         }
         # 2. COPY DEPENDENCIES
         Copy-Item -Force "$depInstall/bin/*.dll" $outDir
-        # 3. WINDEPLOYQT (Plugins only)
+        # 3. WINDEPLOYQT
         $exePath = "$outDir/Jellyfin Desktop.exe"
         $qmlArgs = @()
         if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
         
         Write-Host "Running windeployqt..."
-        # Removed --no-opengl-sw to allow software fallback if D3D11 fails
         & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
             
         # 4. VCRUNTIME (Manual)
