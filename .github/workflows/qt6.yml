@@ -10,11 +10,12 @@ jobs:
   build-win64:
     runs-on: windows-latest
     
-    # CRITICAL: Force the entire stack (Qt, RHI, WebEngine) to align on OpenGL
+    # FORCE SOFTWARE OPENGL (The "Black Screen" Fix)
+    # This bypasses D3D11/Driver conflicts by using the bundled opengl32sw.dll
     env:
       QSG_RHI_BACKEND: opengl
-      QT_OPENGL: desktop
-      QTWEBENGINE_CHROMIUM_FLAGS: "--use-gl=desktop"
+      QT_OPENGL: software
+      QTWEBENGINE_CHROMIUM_FLAGS: "--disable-gpu"
 
     steps:
     - uses: actions/checkout@v4
@@ -36,7 +37,7 @@ jobs:
         # EXACT URL provided by user
         $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z"
         
-        # Increased maximum redirection and added UserAgent to handle SourceForge mirrors
+        # Increased maximum redirection and added UserAgent
         Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 10
         
         7z x mpv.7z -ompv
@@ -164,32 +165,29 @@ jobs:
         $c = '#include <windows.h>' + [Environment]::NewLine + $c
         Set-Content $codecs $c -Encoding UTF8
         
-        # 5. FORCE OPENGL & CONTEXT SHARING (The "Black Screen" Fix)
+        # 5. FORCE OPENGL PATCH
+        # We ensure Context Sharing is enabled and Graphics API is set to OpenGL
+        # Combined with QT_OPENGL=software env var, this forces Software OpenGL
         $mainFile = "src/main.cpp"
         $txt = Get-Content $mainFile -Raw
         
-        # Ensure Headers
+        # Ensure Header
         if ($txt -notmatch "#include <QQuickWindow>") {
             $txt = "#include <QQuickWindow>`r`n" + $txt
         }
         
-        # Inject the Fixes before QGuiApplication
-        # 1. Force WebEngine to Desktop GL to match MpvQt
-        # 2. Enable Shared OpenGL Contexts (Required for MpvQt)
-        # 3. Force RHI to OpenGL
+        # Inject config
         $search = "QGuiApplication app"
         $replacement = @"
-        qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--use-gl=desktop");
             QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
             QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
             QGuiApplication app
         "@
         
         if ($txt -notmatch "setGraphicsApi") {
-            # Use .Replace() to be safe
             $txt = $txt.Replace("QGuiApplication app", $replacement)
             Set-Content -Path $mainFile -Value $txt
-            Write-Host "Patched main.cpp with Context Sharing and WebEngine Flags."
+            Write-Host "Patched main.cpp to force OpenGL Context Sharing."
         }
         
         # 6. Delete directories
@@ -268,6 +266,7 @@ jobs:
         if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
         
         Write-Host "Running windeployqt..."
+        # We explicitly ensure opengl-sw is allowed
         & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
             
         # 4. VCRUNTIME (Manual)
