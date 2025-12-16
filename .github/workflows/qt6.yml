@@ -158,24 +158,31 @@ jobs:
         "@
         Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
-        # --- PATCHES ---
+        # --- PATCH 1: CodecsComponent.cpp ---
         $f='src/player/CodecsComponent.cpp'
         $c=Get-Content $f -Raw
         $c='#include <windows.h>' + [Environment]::NewLine + $c
         Set-Content $f $c
         
-        # --- PATCH: REMOVE MPRIS (DBUS) FOR WINDOWS ---
+        # --- PATCH 2: FORCE REMOVE MPRIS (DBUS) FOR WINDOWS ---
+        # 1. Delete the files so they can't be compiled
+        if (Test-Path "src/mpris") { Remove-Item -Path "src/mpris" -Recurse -Force }
+        
+        # 2. Patch CMakeLists.txt to remove Qt6::DBus and refs to mpris/ files
         $cm='src/CMakeLists.txt'
         $txt=Get-Content $cm -Raw
         $txt=$txt -replace 'Qt6::DBus', '' 
-        $txt=$txt -replace 'mpris/MprisComponent.cpp', ''
-        $txt=$txt -replace 'mpris/MprisComponent.h', ''
+        # Regex to remove lines containing mpris/
+        $txt = [regex]::Replace($txt, '.*mpris/.*', '')
         Set-Content $cm $txt
         
+        # 3. Patch ComponentManager.cpp to remove inclusion and instantiation
         $mgr='src/core/ComponentManager.cpp'
         $mtxt=Get-Content $mgr -Raw
-        $mtxt=$mtxt -replace '#include "mpris/MprisComponent.h"', '// #include "mpris/MprisComponent.h"'
-        $mtxt=$mtxt -replace 'addComponent\(new MprisComponent\(this\)\);', '// addComponent(new MprisComponent(this));'
+        # Remove include line completely
+        $mtxt = [regex]::Replace($mtxt, '#include "mpris/MprisComponent.h"', '')
+        # Remove instantiation line completely (regex matches: addComponent(new MprisComponent(this));)
+        $mtxt = [regex]::Replace($mtxt, 'addComponent\(new MprisComponent\(this\)\);', '')
         Set-Content $mgr $mtxt
 
         # --- CMAKE & NINJA ---
