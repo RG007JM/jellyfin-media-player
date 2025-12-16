@@ -22,7 +22,7 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
-    # 1. MPV FIRST (Direct Download)
+    # 1. MPV FIRST (Verified Working)
     - name: Prepare Libmpv (Stable 20240922 - Fixed URL)
       shell: pwsh
       run: |
@@ -86,7 +86,7 @@ jobs:
         Copy-Item -Force "$root\lib\x64\SDL2main.lib" "dep-install\lib\"
         Copy-Item -Force "$root\lib\x64\SDL2.dll" "dep-install\bin\"
 
-    # FIXED: Added CMAKE_BUILD_TYPE=Release to prevent Debug/Release mismatch
+    # CRITICAL FIX: Force Release Build for ECM and MpvQt
     - name: Prepare ECM and MpvQt
       shell: cmd
       run: |
