@@ -240,11 +240,6 @@ jobs:
         Set-Location build
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
 
-Here’s your workflow with only one change: after windeployqt finishes (and before zipping), it deletes qt.conf from output/ (and also .qt.conf just in case). This keeps the rest identical to what you pasted.​
-
-Replace your current Deploy Qt and Finalize step with this one (everything else in the workflow stays the same):
-
-text
     - name: Deploy Qt and Finalize
       shell: pwsh
       run: |
