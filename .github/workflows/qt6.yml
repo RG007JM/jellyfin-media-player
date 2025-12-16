@@ -5,9 +5,7 @@ jobs:
   build-win64:
     runs-on: windows-latest
 
-    # 1. CRITICAL FIX: Force OpenGL backend.
-    # The application uses QQuickFramebufferObject which REQUIRES OpenGL.
-    # Windows defaults to Direct3D 11 in Qt6, which breaks this specific renderer.
+    # 1. Force OpenGL backend for QQuickFramebufferObject support
     env:
       QSG_RHI_BACKEND: opengl
       QTWEBENGINE_CHROMIUM_FLAGS: --no-sandbox
@@ -37,7 +35,7 @@ jobs:
         unzip -o ninja.zip
         mv -f ninja.exe build/
         
-        # 2. UPDATED MPV VERSION (Guaranteed working version 2025-11-16)
+        # MPV (Guaranteed working version 2025-11-16)
         curl -L "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20251116-git-701201b.7z/download" -o mpv.7z
         7z x mpv.7z
         mkdir -p mpv
@@ -61,7 +59,45 @@ jobs:
           throw "Bundle patch failed: vcredist_x64.exe not found in Bundle.wxs"
         }
 
-    # (Optional) OpenSSL caching steps can remain here if you wish...
+    # 2. RESTORED: Install extra-cmake-modules and MpvQt
+    # These were missing in the previous attempt but are required for the build.
+    - name: Build MpvQt
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        set "INSTALL_DIR=%GITHUB_WORKSPACE%\dep-install"
+        set "INSTALL_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
+        set "INCLUDE_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install/include"
+        
+        if not exist dep-install\bin mkdir dep-install\bin
+        if not exist dep-install\include mkdir dep-install\include
+        if not exist dep-install\lib mkdir dep-install\lib
+        
+        rem Build extra-cmake-modules
+        git clone https://github.com/KDE/extra-cmake-modules.git
+        cd extra-cmake-modules
+        cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
+        ninja -C build install
+        cd ..
+        
+        rem Build MpvQt
+        git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
+        cd mpvqt
+        
+        rem Patch mpvcontroller.h for Windows compatibility (adding virtual destructor)
+        powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
+        echo. >> src\mpvcontroller.cpp
+        echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
+        
+        rem Configure and Install MpvQt
+        cmake -B build -GNinja ^
+          -DCMAKE_BUILD_TYPE=Release ^
+          -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" ^
+          -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" ^
+          -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" ^
+          -DCMAKE_CXX_FLAGS="-I\"%INCLUDE_DIR_FWD%\""
+        ninja -C build install
+        cd ..
 
     - name: Build
       shell: cmd
@@ -74,11 +110,13 @@ jobs:
         if not exist "%WIXBIN%\light.exe" set WIXBIN=C:\Program Files (x86)\WiX Toolset v3.11\bin
         set PATH=%PATH%;%WIXBIN%;%CD%
         
-        rem Configure with CMake
+        rem Configure Main Project
+        rem Added CMAKE_PREFIX_PATH so it finds MpvQt and extra-cmake-modules
         cmake -GNinja ^
           -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
           -DCMAKE_INSTALL_PREFIX=output ^
           -DCMAKE_MAKE_PROGRAM=ninja.exe ^
+          -DCMAKE_PREFIX_PATH="%GITHUB_WORKSPACE:\=/%/dep-install;%Qt6_DIR%" ^
           -DQTROOT=%Qt6_DIR% ^
           -DMPV_INCLUDE_DIR=mpv/include ^
           -DMPV_LIBRARY=mpv/libmpv-2.dll ^
@@ -95,9 +133,8 @@ jobs:
         for %%I in ("%Qt6_DIR%\..\..") do set QTBIN=%%~fI\bin
         %QTBIN%\windeployqt.exe --release --qmldir ..\src\ui output\JellyfinMediaPlayer.exe
         
-        rem 3. CRITICAL: DO NOT REMOVE opengl32sw.dll
-        rem Previous script removed it here. Keeping it ensures fallback for black screen issues.
-
+        rem 3. DO NOT REMOVE opengl32sw.dll
+        
         rem Package MSI/EXE
         ninja windows_package
 
