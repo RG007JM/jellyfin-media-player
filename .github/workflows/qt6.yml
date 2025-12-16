@@ -12,7 +12,7 @@ jobs:
 
     # Force OpenGL renderer (needed for QQuickFramebufferObject video path).
     env:
-      QSG_RHI_BACKEND: opengl
+      # QSG_RHI_BACKEND: opengl
       QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
 
     steps:
@@ -352,29 +352,44 @@ jobs:
           Set-Content $cmakeFile $t -Encoding UTF8
         }
 
-        # 6c) Patch PlayerComponent.cpp (include + init + wiring)
+        # 6c) Patch PlayerComponent.cpp (FORCE include at top, then declare g_smtc AFTER it)
         $pc = "src/player/PlayerComponent.cpp"
         if (Test-Path $pc) {
           $src = Get-Content $pc -Raw -Encoding UTF8
 
-          $incBlock = "#ifdef _WIN32`r`n#include `"WindowsSmtc.h`"`r`n#endif`r`n"
+          $incBlock = @(
+            '#ifdef _WIN32'
+            '#include "WindowsSmtc.h"'
+            '#endif'
+            ''
+          ) -join "`r`n"
+
           if ($src -notmatch 'WindowsSmtc\.h') {
-            if ($src -match '(?m)^#include\s+"PlayerComponent\.h"\s*$') {
-              $src = $src -replace '(?m)^#include\s+"PlayerComponent\.h"\s*$', ('$0' + "`r`n" + $incBlock.TrimEnd())
-            } else {
-              $src = $incBlock + $src
+            $bom = ""
+            if ($src.Length -gt 0 -and [int]$src[0] -eq 0xFEFF) {
+              $bom = [char]0xFEFF
+              $src = $src.Substring(1)
             }
+            $src = $bom + $incBlock + $src
           }
 
           if ($src -notmatch 'CI PATCH: SMTC instance') {
-            $inject = @(
+            $decl = @(
               '#ifdef _WIN32'
               '// CI PATCH: SMTC instance (workflow-injected)'
               'static WindowsSmtc* g_smtc = nullptr;'
               '#endif'
               ''
             ) -join "`r`n"
-            $src = $inject + "`r`n" + $src
+
+            $rxAfterInc = [System.Text.RegularExpressions.Regex]::new(
+              '(?s)(#ifdef\s+_WIN32\r?\n#include\s+"WindowsSmtc\.h"\r?\n#endif\r?\n)'
+            )
+            if ($rxAfterInc.IsMatch($src)) {
+              $src = $rxAfterInc.Replace($src, '$1' + $decl, 1)
+            } else {
+              $src = $decl + $src
+            }
           }
 
           if ($src -notmatch 'CI PATCH: init SMTC') {
