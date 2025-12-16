@@ -328,7 +328,8 @@ jobs:
           "output\qt.conf",
           "output\.qt.conf",
           "build\output\qt.conf",
-          "build\output\.qt.conf"
+          "build\output\.qt.conf",
+          "bundle\win\Bundle.wxs\qt.conf"  # harmless if doesn't exist
         )
 
         foreach ($p in $candidates) {
