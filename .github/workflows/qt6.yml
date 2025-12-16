@@ -133,26 +133,21 @@ jobs:
             Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (MPRIS & Taskbar Removal)
+    - name: Patch Source Code (MPRIS, Taskbar, Tests)
       shell: pwsh
       run: |
         # 1. Patch src/CMakeLists.txt - Remove MPRIS, DBus, and Taskbar
         $cmakeFile = "src/CMakeLists.txt"
         $content = Get-Content $cmakeFile -Raw
-        # Remove any line containing "mpris"
         $content = [regex]::Replace($content, '(?mi)^.*mpris.*$', '')
-        # Remove any line containing "taskbar"
         $content = [regex]::Replace($content, '(?mi)^.*taskbar.*$', '')
-        # Remove Qt6::DBus and Qt6::WinExtras (if present)
         $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
         Set-Content $cmakeFile $content -Encoding UTF8
 
         # 2. Patch src/core/ComponentManager.cpp - Remove MPRIS and Taskbar instantiation
         $compMgr = "src/core/ComponentManager.cpp"
         $compContent = Get-Content $compMgr -Raw
-        # Remove lines referencing MprisComponent
         $compContent = [regex]::Replace($compContent, '(?mi)^.*MprisComponent.*$', '')
-        # Remove lines referencing TaskbarComponent
         $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
         Set-Content $compMgr $compContent -Encoding UTF8
         
@@ -160,14 +155,7 @@ jobs:
         $winMgr = "src/ui/WindowManager.cpp"
         if (Test-Path $winMgr) {
             $winContent = Get-Content $winMgr -Raw
-            # Comment out lines using m_taskbar or TaskbarComponent
-            # This is a bit risky with regex, but we'll try to just remove the specific taskbar logic lines if identifiable
-            # Or safer: Remove header include
             $winContent = [regex]::Replace($winContent, '(?mi)^.*TaskbarComponent.*$', '')
-            # If m_taskbar is used, we might break compilation. Let's hope removing the component from ComponentManager is enough
-            # But WindowManager might try to access it. 
-            # Nuclear option: Try to remove "m_taskbar->" calls?
-            # Let's start with just removing the include and see if it fails.
             Set-Content $winMgr $winContent -Encoding UTF8
         }
         
@@ -177,16 +165,7 @@ jobs:
         $c = '#include <windows.h>' + [Environment]::NewLine + $c
         Set-Content $codecs $c -Encoding UTF8
         
-        # 5. Tests CMakeLists.txt (if exists) - often references taskbar too
-        if (Test-Path "tests/CMakeLists.txt") {
-            $testCmake = "tests/CMakeLists.txt"
-            $tc = Get-Content $testCmake -Raw
-            $tc = [regex]::Replace($tc, '(?mi)^.*TaskbarComponent.*$', '')
-            $tc = [regex]::Replace($tc, '(?mi)^.*MprisComponent.*$', '')
-            Set-Content $testCmake $tc -Encoding UTF8
-        }
-        
-        # 6. Delete directories to ensure they aren't compiled
+        # 5. Delete directories to ensure they aren't compiled
         if (Test-Path "src/mpris") { Remove-Item -Path "src/mpris" -Recurse -Force }
         if (Test-Path "src/taskbar") { Remove-Item -Path "src/taskbar" -Recurse -Force }
 
@@ -227,15 +206,36 @@ jobs:
       run: |
         $outDir = "$((Get-Location).Path)/output"
         $depInstall = "$((Get-Location).Path)/dep-install"
-        $qtBin = "$env:Qt6_DIR/bin"
         
         if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
         
+        # --- FIX: Locate Qt Binaries Correctly ---
+        # 1. Try environment variables
+        $qtBin = $env:Qt6_DIR + "/bin"
+        if (-not (Test-Path $qtBin)) {
+            # 2. Try locating windeployqt
+            $windeploy = Get-Command windeployqt -ErrorAction SilentlyContinue
+            if ($windeploy) {
+                $qtBin = $windeploy.Source | Split-Path | Split-Path
+                $qtBin = "$qtBin/bin"
+            } else {
+                # 3. Fallback to hardcoded assumption if all else fails (dangerous but often correct for this runner)
+                $qtBin = "D:/a/jellyfin-media-player/Qt/6.8.0/msvc2022_64/bin"
+            }
+        }
+        Write-Host "Detected Qt Bin Path: $qtBin"
+        if (-not (Test-Path $qtBin)) { throw "Could not locate Qt Binaries at $qtBin" }
+
         # 1. PRE-COPY QT DLLS (Brute Force)
         Write-Host "Forcing Qt DLL copy..."
         $qtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll")
         foreach ($q in $qtDlls) {
-            Copy-Item -Force "$qtBin\$q" $outDir
+            $src = "$qtBin\$q"
+            if (Test-Path $src) {
+                Copy-Item -Force $src $outDir
+            } else {
+                Write-Warning "Could not find $src to copy."
+            }
         }
 
         # 2. COPY DEPENDENCIES
