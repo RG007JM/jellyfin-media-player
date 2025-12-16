@@ -22,6 +22,27 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
+    # 1. MPV FIRST (Direct Download)
+    - name: Prepare Libmpv (Stable 20240922 - Fixed URL)
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path "dep-install/bin", "dep-install/lib", "dep-install/include"
+        
+        $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z"
+        Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
+        
+        7z x mpv.7z -ompv
+        Set-Location mpv
+        
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /exports libmpv-2.dll > exports.txt"
+        $defContent = @("LIBRARY libmpv-2.dll", "EXPORTS") + (Get-Content exports.txt | ForEach-Object { if ($_ -match "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)") { $matches[1] } })
+        $defContent | Set-Content libmpv-2.def
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
+        
+        Copy-Item -Recurse -Force include\* ..\dep-install\include\
+        Copy-Item libmpv.lib ..\dep-install\lib\
+        Copy-Item libmpv-2.dll ..\dep-install\bin\
+
     - name: Install Qt 6.8.0
       uses: jurplel/install-qt-action@v4
       with:
@@ -33,9 +54,9 @@ jobs:
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        mkdir dep-install\bin
-        mkdir dep-install\include
-        mkdir dep-install\lib
+        if not exist dep-install\bin mkdir dep-install\bin
+        if not exist dep-install\include mkdir dep-install\include
+        if not exist dep-install\lib mkdir dep-install\lib
         
         curl -L https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip -o ninja.zip
         tar -xf ninja.zip -C dep-install\bin
@@ -54,25 +75,6 @@ jobs:
         echo "C:\VulkanSDK\Bin" >> $env:GITHUB_PATH
         Remove-Item VulkanSDK.exe
 
-    - name: Prepare Libmpv (Stable 20240922 - Fixed URL & Syntax)
-      shell: pwsh
-      run: |
-        # Fixed URL (downloads.sourceforge.net) and removed incompatible 'Get-Content' check
-        $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z"
-        Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
-        
-        7z x mpv.7z -ompv
-        Set-Location mpv
-        
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /exports libmpv-2.dll > exports.txt"
-        $defContent = @("LIBRARY libmpv-2.dll", "EXPORTS") + (Get-Content exports.txt | ForEach-Object { if ($_ -match "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)") { $matches[1] } })
-        $defContent | Set-Content libmpv-2.def
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
-        
-        Copy-Item -Recurse -Force include\* ..\dep-install\include\
-        Copy-Item libmpv.lib ..\dep-install\lib\
-        Copy-Item libmpv-2.dll ..\dep-install\bin\
-
     - name: Prepare SDL2
       shell: pwsh
       run: |
@@ -84,6 +86,7 @@ jobs:
         Copy-Item -Force "$root\lib\x64\SDL2main.lib" "dep-install\lib\"
         Copy-Item -Force "$root\lib\x64\SDL2.dll" "dep-install\bin\"
 
+    # FIXED: Added CMAKE_BUILD_TYPE=Release to prevent Debug/Release mismatch
     - name: Prepare ECM and MpvQt
       shell: cmd
       run: |
@@ -94,19 +97,18 @@ jobs:
         
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
-        cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
+        cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
         ninja -C build install
         cd ..
         
         git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
         cd mpvqt
         
-        rem --- PATCH MPVQT FOR MSVC ---
         powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
         echo. >> src\mpvcontroller.cpp
         echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
         
-        cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" -DCMAKE_CXX_FLAGS="-I\"%INCLUDE_DIR_FWD%\""
+        cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" -DCMAKE_CXX_FLAGS="-I\"%INCLUDE_DIR_FWD%\""
         ninja -C build install
         cd ..
 
