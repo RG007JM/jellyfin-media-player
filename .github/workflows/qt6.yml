@@ -10,12 +10,13 @@ jobs:
   build-win64:
     runs-on: windows-latest
     
-    # FORCE SOFTWARE OPENGL (The "Black Screen" Fix)
-    # This bypasses D3D11/Driver conflicts by using the bundled opengl32sw.dll
+    # NUCLEAR OPTION: FORCE SOFTWARE RENDERING FOR EVERYTHING
+    # If the interface is black, it's usually because GPU accel failed or resources are missing.
+    # We disable GPU entirely to ensure we get an image on screen.
     env:
-      QSG_RHI_BACKEND: opengl
+      QSG_RHI_BACKEND: software
       QT_OPENGL: software
-      QTWEBENGINE_CHROMIUM_FLAGS: "--disable-gpu"
+      QTWEBENGINE_CHROMIUM_FLAGS: "--disable-gpu --no-sandbox"
 
     steps:
     - uses: actions/checkout@v4
@@ -34,10 +35,7 @@ jobs:
       run: |
         New-Item -ItemType Directory -Force -Path "dep-install/bin", "dep-install/lib", "dep-install/include"
         
-        # EXACT URL provided by user
         $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z"
-        
-        # Increased maximum redirection and added UserAgent
         Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 10
         
         7z x mpv.7z -ompv
@@ -133,7 +131,7 @@ jobs:
             Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (MPRIS, Taskbar, Tests, Force OpenGL)
+    - name: Patch Source Code (NO Graphics API Patches)
       shell: pwsh
       run: |
         # 1. Patch src/CMakeLists.txt
@@ -165,30 +163,8 @@ jobs:
         $c = '#include <windows.h>' + [Environment]::NewLine + $c
         Set-Content $codecs $c -Encoding UTF8
         
-        # 5. FORCE OPENGL PATCH
-        # We ensure Context Sharing is enabled and Graphics API is set to OpenGL
-        # Combined with QT_OPENGL=software env var, this forces Software OpenGL
-        $mainFile = "src/main.cpp"
-        $txt = Get-Content $mainFile -Raw
-        
-        # Ensure Header
-        if ($txt -notmatch "#include <QQuickWindow>") {
-            $txt = "#include <QQuickWindow>`r`n" + $txt
-        }
-        
-        # Inject config
-        $search = "QGuiApplication app"
-        $replacement = @"
-            QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
-            QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
-            QGuiApplication app
-        "@
-        
-        if ($txt -notmatch "setGraphicsApi") {
-            $txt = $txt.Replace("QGuiApplication app", $replacement)
-            Set-Content -Path $mainFile -Value $txt
-            Write-Host "Patched main.cpp to force OpenGL Context Sharing."
-        }
+        # 5. NO GRAPHICS PATCH
+        # We want default behavior (which we override via env vars to Software)
         
         # 6. Delete directories
         if (Test-Path "src/mpris") { Remove-Item -Path "src/mpris" -Recurse -Force }
@@ -224,7 +200,7 @@ jobs:
         Set-Location build
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
 
-    - name: Deploy Qt and Finalize
+    - name: Deploy Qt and Finalize (Manual Resource Copy)
       shell: pwsh
       run: |
         $outDir = "$((Get-Location).Path)/output"
@@ -246,10 +222,11 @@ jobs:
             }
         }
         Write-Host "Detected Qt Bin Path: $qtBin"
-        if (-not (Test-Path $qtBin)) { throw "Could not locate Qt Binaries at $qtBin" }
+        $qtRoot = Split-Path $qtBin -Parent
+        
         # 1. PRE-COPY QT DLLS
         Write-Host "Forcing Qt DLL copy..."
-        $qtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll")
+        $qtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll", "Qt6WebEngineCore.dll", "Qt6WebEngineQuick.dll")
         foreach ($q in $qtDlls) {
             $src = "$qtBin\$q"
             if (Test-Path $src) {
@@ -258,29 +235,48 @@ jobs:
                 Write-Warning "Could not find $src to copy."
             }
         }
-        # 2. COPY DEPENDENCIES
+        
+        # 2. COPY WEBENGINE RESOURCES (Critical for UI)
+        # Without icudtl.dat and qtwebengine_resources.pak, WebEngine paints BLACK.
+        Write-Host "Manually copying WebEngine Resources..."
+        $resSrc = "$qtRoot/resources"
+        if (Test-Path $resSrc) {
+            Copy-Item -Force -Recurse "$resSrc\*" $outDir
+            # Also copy to a 'resources' subdir just in case the app expects it there
+            New-Item -ItemType Directory -Force -Path "$outDir/resources"
+            Copy-Item -Force -Recurse "$resSrc\*" "$outDir/resources"
+        } else {
+            Write-Warning "Could not find Qt Resources at $resSrc"
+        }
+        
+        # 3. COPY WEBENGINE PROCESS
+        $processExe = "$qtBin\QtWebEngineProcess.exe"
+        if (Test-Path $processExe) {
+            Copy-Item -Force $processExe $outDir
+        } else {
+            Write-Warning "Missing QtWebEngineProcess.exe!"
+        }
+        
+        # 4. COPY DEPENDENCIES
         Copy-Item -Force "$depInstall/bin/*.dll" $outDir
-        # 3. WINDEPLOYQT
+        
+        # 5. WINDEPLOYQT
         $exePath = "$outDir/Jellyfin Desktop.exe"
         $qmlArgs = @()
         if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
         
         Write-Host "Running windeployqt..."
-        # We explicitly ensure opengl-sw is allowed
         & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
             
-        # 4. VCRUNTIME (Manual)
+        # 6. VCRUNTIME (Manual)
         $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
         $runtimeDll = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
         $redistDir = $runtimeDll.DirectoryName
         Copy-Item -Force "$redistDir\*.dll" $outDir
-        # 5. DIAGNOSTICS
+        
+        # 7. DIAGNOSTICS
         Write-Host "--- Content of Output Dir ---"
         Get-ChildItem $outDir | Select-Object Name
-        
-        # 6. VERIFY ARCHITECTURE
-        Write-Host "--- Checking DLL Architecture ---"
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /headers output\Qt6Quick.dll | findstr machine"
 
     - name: Create Portable Zip
       shell: pwsh
