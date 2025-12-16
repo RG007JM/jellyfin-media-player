@@ -10,13 +10,11 @@ jobs:
   build-win64:
     runs-on: windows-latest
     
-    # NUCLEAR OPTION: FORCE SOFTWARE RENDERING FOR EVERYTHING
-    # If the interface is black, it's usually because GPU accel failed or resources are missing.
-    # We disable GPU entirely to ensure we get an image on screen.
+    # 1. REMOVE ALL GRAPHICS OVERRIDES
+    # We strip out QSG_RHI_BACKEND and QT_OPENGL. 
+    # This allows Qt 6 to default to Direct3D 11, which is the native, stable path for WebEngine on Windows.
     env:
-      QSG_RHI_BACKEND: software
-      QT_OPENGL: software
-      QTWEBENGINE_CHROMIUM_FLAGS: "--disable-gpu --no-sandbox"
+      QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
 
     steps:
     - uses: actions/checkout@v4
@@ -131,7 +129,7 @@ jobs:
             Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (NO Graphics API Patches)
+    - name: Patch Source Code (Convert MpvVideoItem to Dummy)
       shell: pwsh
       run: |
         # 1. Patch src/CMakeLists.txt
@@ -142,33 +140,30 @@ jobs:
         $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
         Set-Content $cmakeFile $content -Encoding UTF8
         
-        # 2. Patch src/core/ComponentManager.cpp
-        $compMgr = "src/core/ComponentManager.cpp"
-        $compContent = Get-Content $compMgr -Raw
-        $compContent = [regex]::Replace($compContent, '(?mi)^.*MprisComponent.*$', '')
-        $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
-        Set-Content $compMgr $compContent -Encoding UTF8
-        
-        # 3. Patch src/ui/WindowManager.cpp
-        $winMgr = "src/ui/WindowManager.cpp"
-        if (Test-Path $winMgr) {
-            $winContent = Get-Content $winMgr -Raw
-            $winContent = [regex]::Replace($winContent, '(?mi)^.*TaskbarComponent.*$', '')
-            Set-Content $winMgr $winContent -Encoding UTF8
-        }
-        
-        # 4. CodecsComponent.cpp patch
+        # 2. Patch CodecsComponent.cpp
         $codecs = "src/player/CodecsComponent.cpp"
         $c = Get-Content $codecs -Raw
         $c = '#include <windows.h>' + [Environment]::NewLine + $c
         Set-Content $codecs $c -Encoding UTF8
         
-        # 5. NO GRAPHICS PATCH
-        # We want default behavior (which we override via env vars to Software)
+        # 3. CRITICAL: Neutering MpvVideoItem to support D3D11
+        # We change inheritance from QQuickFramebufferObject -> QQuickItem
+        # This removes the OpenGL requirement, allowing the UI to load in D3D11 mode.
         
-        # 6. Delete directories
-        if (Test-Path "src/mpris") { Remove-Item -Path "src/mpris" -Recurse -Force }
-        if (Test-Path "src/taskbar") { Remove-Item -Path "src/taskbar" -Recurse -Force }
+        $header = "src/player/MpvVideoItem.h"
+        $htxt = Get-Content $header -Raw
+        $htxt = $htxt.Replace("QQuickFramebufferObject", "QQuickItem")
+        $htxt = $htxt.Replace("#include <QQuickFramebufferObject>", "#include <QQuickItem>")
+        $htxt = $htxt.Replace("Renderer *createRenderer()", "// Renderer *createRenderer()")
+        Set-Content $header $htxt
+        
+        $cpp = "src/player/MpvVideoItem.cpp"
+        $ctxt = Get-Content $cpp -Raw
+        # Disable createRenderer implementation
+        $ctxt = $ctxt.Replace("MpvVideoItem::Renderer *MpvVideoItem::createRenderer()", "void *MpvVideoItem__createRenderer_disabled()")
+        Set-Content $cpp $ctxt
+        
+        Write-Host "MpvVideoItem successfully patched to dummy QQuickItem."
 
     - name: Build Jellyfin Desktop
       shell: pwsh
@@ -200,7 +195,7 @@ jobs:
         Set-Location build
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
 
-    - name: Deploy Qt and Finalize (Manual Resource Copy)
+    - name: Deploy Qt and Finalize
       shell: pwsh
       run: |
         $outDir = "$((Get-Location).Path)/output"
@@ -237,25 +232,17 @@ jobs:
         }
         
         # 2. COPY WEBENGINE RESOURCES (Critical for UI)
-        # Without icudtl.dat and qtwebengine_resources.pak, WebEngine paints BLACK.
         Write-Host "Manually copying WebEngine Resources..."
         $resSrc = "$qtRoot/resources"
         if (Test-Path $resSrc) {
             Copy-Item -Force -Recurse "$resSrc\*" $outDir
-            # Also copy to a 'resources' subdir just in case the app expects it there
             New-Item -ItemType Directory -Force -Path "$outDir/resources"
             Copy-Item -Force -Recurse "$resSrc\*" "$outDir/resources"
-        } else {
-            Write-Warning "Could not find Qt Resources at $resSrc"
         }
         
         # 3. COPY WEBENGINE PROCESS
         $processExe = "$qtBin\QtWebEngineProcess.exe"
-        if (Test-Path $processExe) {
-            Copy-Item -Force $processExe $outDir
-        } else {
-            Write-Warning "Missing QtWebEngineProcess.exe!"
-        }
+        if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
         
         # 4. COPY DEPENDENCIES
         Copy-Item -Force "$depInstall/bin/*.dll" $outDir
