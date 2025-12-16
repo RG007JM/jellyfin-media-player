@@ -10,9 +10,7 @@ jobs:
   build-win64:
     runs-on: windows-latest
 
-    # FIX: Force OpenGL backend.
-    # Direct3D 11 is the default in Qt6 but causes the black screen with QQuickFramebufferObject.
-    # We must use OpenGL for the video renderer to function.
+    # Force OpenGL renderer (needed for QQuickFramebufferObject video path).
     env:
       QSG_RHI_BACKEND: opengl
       QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
@@ -124,16 +122,16 @@ jobs:
       run: |
         $bundle  = "bundle/win/Bundle.wxs"
         if (Test-Path $bundle) {
-            $c = Get-Content -Raw $bundle -Encoding UTF8
-            $c = $c -replace 'Source=".*vcredist_x64.exe"', 'Source="bundle\win\vcredist_x64.exe"'
-            $c = [regex]::Replace($c, 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe', 'vcredist_x64.exe')
-            Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
+          $c = Get-Content -Raw $bundle -Encoding UTF8
+          $c = $c -replace 'Source=".*vcredist_x64.exe"', 'Source="bundle\win\vcredist_x64.exe"'
+          $c = [regex]::Replace($c, 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe', 'vcredist_x64.exe')
+          Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
     - name: Patch Source Code (Include Fix + GL Compat)
       shell: pwsh
       run: |
-        # 1. Patch src/CMakeLists.txt
+        # 1) Patch src/CMakeLists.txt
         $cmakeFile = "src/CMakeLists.txt"
         $content = Get-Content $cmakeFile -Raw
         $content = [regex]::Replace($content, '(?mi)^.*mpris.*$', '')
@@ -141,7 +139,7 @@ jobs:
         $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
         Set-Content $cmakeFile $content -Encoding UTF8
 
-        # 2. Patch src/core/ComponentManager.cpp - FIXING THE INCLUDE ERROR
+        # 2) Patch src/core/ComponentManager.cpp
         $compMgr = "src/core/ComponentManager.cpp"
         $compContent = Get-Content $compMgr -Raw
         $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*MprisComponent\.h.*$', '')
@@ -150,15 +148,15 @@ jobs:
         $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
         Set-Content $compMgr $compContent -Encoding UTF8
 
-        # 3. Patch src/ui/WindowManager.cpp
+        # 3) Patch src/ui/WindowManager.cpp
         $winMgr = "src/ui/WindowManager.cpp"
         if (Test-Path $winMgr) {
-            $winContent = Get-Content $winMgr -Raw
-            $winContent = [regex]::Replace($winContent, '(?mi)^.*TaskbarComponent.*$', '')
-            Set-Content $winMgr $winContent -Encoding UTF8
+          $winContent = Get-Content $winMgr -Raw
+          $winContent = [regex]::Replace($winContent, '(?mi)^.*TaskbarComponent.*$', '')
+          Set-Content $winMgr $winContent -Encoding UTF8
         }
 
-        # 4. CodecsComponent.cpp patch
+        # 4) CodecsComponent.cpp: ensure windows.h is included (idempotent)
         $codecs = "src/player/CodecsComponent.cpp"
         $c = Get-Content $codecs -Raw
         if ($c -notmatch '#include\s+<windows\.h>') {
@@ -166,8 +164,7 @@ jobs:
           Set-Content $codecs $c -Encoding UTF8
         }
 
-        # 5. NEW: Force a Desktop OpenGL compatibility-profile default context (hardware)
-        # Inserted into src/main.cpp (idempotent).
+        # 5) main.cpp: force Desktop OpenGL + CompatibilityProfile (idempotent, no here-strings)
         $main = "src/main.cpp"
         if (Test-Path $main) {
           $m = Get-Content $main -Raw -Encoding UTF8
@@ -181,40 +178,36 @@ jobs:
               $m = "#include <QCoreApplication>`r`n" + $m
             }
 
-            $fn = @"
-            static void forceCompatOpenGL()
-            {
-                QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
-                QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
-            
-                QSurfaceFormat fmt;
-                fmt.setRenderableType(QSurfaceFormat::OpenGL);
-                fmt.setVersion(3, 3);
-                fmt.setProfile(QSurfaceFormat::CompatibilityProfile);
-                fmt.setDepthBufferSize(24);
-                fmt.setStencilBufferSize(8);
-                QSurfaceFormat::setDefaultFormat(fmt);
-            }
-            
-            "@
+            $fn = @(
+              'static void forceCompatOpenGL()'
+              '{'
+              '    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);'
+              '    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);'
+              ''
+              '    QSurfaceFormat fmt;'
+              '    fmt.setRenderableType(QSurfaceFormat::OpenGL);'
+              '    fmt.setVersion(3, 3);'
+              '    fmt.setProfile(QSurfaceFormat::CompatibilityProfile);'
+              '    fmt.setDepthBufferSize(24);'
+              '    fmt.setStencilBufferSize(8);'
+              '    QSurfaceFormat::setDefaultFormat(fmt);'
+              '}'
+              ''
+              ''
+            ) -join "`r`n"
 
-            # Add helper before main()
+            # Insert helper before first "int main("
             $rxMain = [regex]::new("(?m)^\s*int\s+main\s*\(")
             $m = $rxMain.Replace($m, $fn + "int main(", 1)
 
-            # Call it immediately at main() entry
-            $m = [regex]::Replace(
-              $m,
-              '(?s)(int\s+main\s*\([^\)]*\)\s*\{)',
-              '$1' + "`r`n    forceCompatOpenGL();",
-              1
-            )
+            # Insert call immediately after main() opening brace
+            $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{)', '$1' + "`r`n    forceCompatOpenGL();", 1)
 
             Set-Content $main $m -Encoding UTF8
           }
         }
 
-        Write-Host "Source patched: Mpris/Taskbar includes removed. Renderer intact. GL compat patch applied."
+        Write-Host "Source patched (includes + GL compat)."
 
     - name: Build Jellyfin Desktop
       shell: pwsh
@@ -226,19 +219,19 @@ jobs:
         $mpvQtDir = "$depInstall/lib/cmake/MpvQt"
         $installPrefix = "$root/output"
 
-        # --- OVERRIDE FindMPV.cmake ---
+        # --- OVERRIDE FindMPV.cmake (no here-strings) ---
         $cmakeMod = "CMakeModules/FindMPV.cmake"
-        $overrideContent = @"
-        set(MPV_FOUND TRUE)
-        set(MPV_INCLUDE_DIR "$incMpv")
-        set(MPV_LIBRARY "$libMpv")
-        set(MPV_LIBRARIES "$libMpv")
-        set(MPV_INCLUDE_DIRS "$incMpv")
-        if(NOT TARGET MPV::MPV)
-          add_library(MPV::MPV UNKNOWN IMPORTED)
-          set_target_properties(MPV::MPV PROPERTIES IMPORTED_LOCATION "$libMpv" INTERFACE_INCLUDE_DIRECTORIES "$incMpv")
-        endif()
-        "@
+        $overrideContent = @(
+          'set(MPV_FOUND TRUE)'
+          "set(MPV_INCLUDE_DIR `"$incMpv`")"
+          "set(MPV_LIBRARY `"$libMpv`")"
+          "set(MPV_LIBRARIES `"$libMpv`")"
+          "set(MPV_INCLUDE_DIRS `"$incMpv`")"
+          'if(NOT TARGET MPV::MPV)'
+          '  add_library(MPV::MPV UNKNOWN IMPORTED)'
+          "  set_target_properties(MPV::MPV PROPERTIES IMPORTED_LOCATION `"$libMpv`" INTERFACE_INCLUDE_DIRECTORIES `"$incMpv`")"
+          'endif()'
+        ) -join "`r`n"
         Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
@@ -252,70 +245,67 @@ jobs:
       run: |
         $outDir = "$((Get-Location).Path)/output"
         $depInstall = "$((Get-Location).Path)/dep-install"
-
         if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
 
-        # --- FIX: Locate Qt Binaries Correctly ---
+        # Locate Qt binaries
         $qtBin = $env:Qt6_DIR + "/bin"
         if (-not (Test-Path $qtBin)) {
-            $windeploy = Get-Command windeployqt -ErrorAction SilentlyContinue
-            if ($windeploy) {
-                $qtBin = $windeploy.Source | Split-Path | Split-Path
-                $qtBin = "$qtBin/bin"
-            } else {
-                $qtBin = "D:/a/jellyfin-media-player/Qt/6.8.0/msvc2022_64/bin"
-            }
+          $windeploy = Get-Command windeployqt -ErrorAction SilentlyContinue
+          if ($windeploy) {
+            $qtBin = $windeploy.Source | Split-Path | Split-Path
+            $qtBin = "$qtBin/bin"
+          } else {
+            $qtBin = "D:/a/jellyfin-media-player/Qt/6.8.0/msvc2022_64/bin"
+          }
         }
         Write-Host "Detected Qt Bin Path: $qtBin"
         $qtRoot = Split-Path $qtBin -Parent
 
-        # 1. PRE-COPY QT DLLS
+        # Pre-copy core DLLs (kept from your workflow)
         Write-Host "Forcing Qt DLL copy..."
-        $qtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll", "Qt6WebEngineCore.dll", "Qt6WebEngineQuick.dll")
+        $qtDlls = @(
+          "Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Network.dll",
+          "Qt6Quick.dll","Qt6Qml.dll","Qt6Svg.dll","Qt6OpenGL.dll",
+          "Qt6QmlModels.dll","Qt6QmlWorkerScript.dll",
+          "Qt6WebEngineCore.dll","Qt6WebEngineQuick.dll"
+        )
         foreach ($q in $qtDlls) {
-            $src = "$qtBin\$q"
-            if (Test-Path $src) {
-                Copy-Item -Force $src $outDir
-            } else {
-                Write-Warning "Could not find $src to copy."
-            }
+          $src = "$qtBin\$q"
+          if (Test-Path $src) { Copy-Item -Force $src $outDir } else { Write-Warning "Could not find $src" }
         }
 
-        # 2. COPY WEBENGINE RESOURCES
+        # WebEngine resources + process
         Write-Host "Manually copying WebEngine Resources..."
         $resSrc = "$qtRoot/resources"
         if (Test-Path $resSrc) {
-            Copy-Item -Force -Recurse "$resSrc\*" $outDir
-            New-Item -ItemType Directory -Force -Path "$outDir/resources"
-            Copy-Item -Force -Recurse "$resSrc\*" "$outDir/resources"
+          New-Item -ItemType Directory -Force -Path "$outDir/resources" | Out-Null
+          Copy-Item -Force -Recurse "$resSrc\*" "$outDir/resources"
         }
-
-        # 3. COPY WEBENGINE PROCESS
         $processExe = "$qtBin\QtWebEngineProcess.exe"
         if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
 
-        # 4. COPY DEPENDENCIES
+        # Dependencies (libmpv, SDL2, OpenSSL, etc.)
         Copy-Item -Force "$depInstall/bin/*.dll" $outDir
 
-        # 5. WINDEPLOYQT
+        # windeployqt
         $exePath = "$outDir/Jellyfin Desktop.exe"
         $qmlArgs = @()
         if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
-
         Write-Host "Running windeployqt..."
         & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
 
-        # 6. VCRUNTIME (Manual)
+        # Remove qt.conf/.qt.conf (avoid accidental bad path overrides)
+        Remove-Item -Force -ErrorAction SilentlyContinue "$outDir\qt.conf"
+        Remove-Item -Force -ErrorAction SilentlyContinue "$outDir\.qt.conf"
+
+        # VCRUNTIME manual copy
         $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
         $runtimeDll = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
-        $redistDir = $runtimeDll.DirectoryName
-        Copy-Item -Force "$redistDir\*.dll" $outDir
+        if ($runtimeDll) {
+          $redistDir = $runtimeDll.DirectoryName
+          Copy-Item -Force "$redistDir\*.dll" $outDir
+        }
 
-        # 7. FIX: KEEP OPENGL RASTERIZER
-        # Previous workflow deleted opengl32sw.dll. We MUST keep it because we set backend to 'opengl'.
-        # If hardware OpenGL fails, this file renders the UI and video.
-
-        # 8. DIAGNOSTICS
         Write-Host "--- Content of Output Dir ---"
         Get-ChildItem $outDir | Select-Object Name
 
