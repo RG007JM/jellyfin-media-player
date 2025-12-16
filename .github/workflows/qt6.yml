@@ -318,6 +318,32 @@ jobs:
       with:
         name: jellyfin-desktop-portable
         path: Jellyfin-Desktop-Portable.zip
+    
+    - name: Remove qt.conf before installer
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Continue"
+
+        $candidates = @(
+          "output\qt.conf",
+          "output\.qt.conf",
+          "build\output\qt.conf",
+          "build\output\.qt.conf"
+        )
+
+        foreach ($p in $candidates) {
+          if (Test-Path $p) {
+            Write-Host "Deleting $p"
+            Remove-Item -Force $p
+          }
+        }
+
+        # Catch-all (in case packaging stages elsewhere)
+        Get-ChildItem -Path "build" -Recurse -Force -Filter "qt.conf" -ErrorAction SilentlyContinue |
+          ForEach-Object { Write-Host "Deleting $($_.FullName)"; Remove-Item -Force $_.FullName }
+
+        Get-ChildItem -Path "build" -Recurse -Force -Filter ".qt.conf" -ErrorAction SilentlyContinue |
+          ForEach-Object { Write-Host "Deleting $($_.FullName)"; Remove-Item -Force $_.FullName }
 
     - name: Build Installer Package
       shell: cmd
