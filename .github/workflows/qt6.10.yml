@@ -123,7 +123,106 @@ jobs:
     - name: Patch Source Code (Include Fix + GL Compat)
       shell: pwsh
       run: |
-        # (unchanged; omitted here for brevity — keep your existing patch block)
+        # 1) Patch src/CMakeLists.txt
+        $cmakeFile = "src/CMakeLists.txt"
+        $content = Get-Content $cmakeFile -Raw
+        $content = [regex]::Replace($content, '(?mi)^.*mpris.*$', '')
+        $content = [regex]::Replace($content, '(?mi)^.*taskbar.*$', '')
+        $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
+        Set-Content $cmakeFile $content -Encoding UTF8
+        # 2) Patch src/core/ComponentManager.cpp
+        $compMgr = "src/core/ComponentManager.cpp"
+        $compContent = Get-Content $compMgr -Raw
+        $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*MprisComponent\.h.*$', '')
+        $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*TaskbarComponent\.h.*$', '')
+        $compContent = [regex]::Replace($compContent, '(?mi)^.*MprisComponent.*$', '')
+        $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
+        Set-Content $compMgr $compContent -Encoding UTF8
+        # 3) Patch src/ui/WindowManager.cpp
+        $winMgr = "src/ui/WindowManager.cpp"
+        if (Test-Path $winMgr) {
+          $winContent = Get-Content $winMgr -Raw
+          $winContent = [regex]::Replace($winContent, '(?mi)^.*TaskbarComponent.*$', '')
+          Set-Content $winMgr $winContent -Encoding UTF8
+        }
+        # 4) CodecsComponent.cpp: ensure windows.h is included (idempotent)
+        $codecs = "src/player/CodecsComponent.cpp"
+        $c = Get-Content $codecs -Raw
+        if ($c -notmatch '#include\s+<windows\.h>') {
+          $c = '#include <windows.h>' + [Environment]::NewLine + $c
+          Set-Content $codecs $c -Encoding UTF8
+        }
+        # 5) main.cpp: force Desktop OpenGL + CompatibilityProfile (idempotent, no here-strings)
+        $main = "src/main.cpp"
+        if (Test-Path $main) {
+          $m = Get-Content $main -Raw -Encoding UTF8
+          if ($m -notmatch "forceCompatOpenGL") {
+            if ($m -notmatch '#include\s+<QSurfaceFormat>') {
+              $m = "#include <QSurfaceFormat>`r`n" + $m
+            }
+            if ($m -notmatch '#include\s+<QCoreApplication>') {
+              $m = "#include <QCoreApplication>`r`n" + $m
+            }
+            $fn = @(
+              'static void forceCompatOpenGL()'
+              '{'
+              '    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);'
+              '    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);'
+              ''
+              '    QSurfaceFormat fmt;'
+              '    fmt.setRenderableType(QSurfaceFormat::OpenGL);'
+              '    fmt.setVersion(3, 3);'
+              '    fmt.setProfile(QSurfaceFormat::CompatibilityProfile);'
+              '    fmt.setDepthBufferSize(24);'
+              '    fmt.setStencilBufferSize(8);'
+              '    QSurfaceFormat::setDefaultFormat(fmt);'
+              '}'
+              ''
+              ''
+            ) -join "`r`n"
+            # Insert helper before first "int main("
+            $rxMain = [regex]::new("(?m)^\s*int\s+main\s*\(")
+            $m = $rxMain.Replace($m, $fn + "int main(", 1)
+            # Insert call immediately after main() opening brace
+            $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{)', '$1' + "`r`n    forceCompatOpenGL();", 1)
+            Set-Content $main $m -Encoding UTF8
+          }
+        }
+        # 6) Remove qt.conf install + generation (required if qt.conf is deleted everywhere)
+        $filesToPatch = @(
+          "CMakeModules/CPackConfiguration.cmake",
+          "CMakeModules/QtConfiguration.cmake"
+        )
+        
+        foreach ($f in $filesToPatch) {
+          if (-not (Test-Path $f)) { continue }
+        
+          $t = Get-Content $f -Raw -Encoding UTF8
+          $orig = $t
+        
+          # Remove the CPack install rule that installs bundle/win/qt.conf
+          $t = [regex]::Replace($t,
+            '(?mi)^\s*install\s*\(\s*FILES\s+\$\{CMAKE_SOURCE_DIR\}/bundle/win/qt\.conf\s+DESTINATION\s+\.\s*\)\s*$',
+            '# (CI patch) qt.conf disabled: install(FILES ${CMAKE_SOURCE_DIR}/bundle/win/qt.conf DESTINATION .)'
+          )
+        
+          # Remove/disable the QtConfiguration rule that writes qt.conf into QTROOT/bin
+          $t = [regex]::Replace($t,
+            '(?mi)^\s*file\s*\(\s*WRITE\s+\$\{QTROOT\}/bin/qt\.conf\s+\$\{QTCONFCONTENT\}\s*\)\s*$',
+            '# (CI patch) qt.conf disabled: file(WRITE ${QTROOT}/bin/qt.conf ${QTCONFCONTENT})'
+          )
+        
+          if ($t -ne $orig) {
+            Set-Content -Path $f -Value $t -Encoding UTF8
+            Write-Host "Patched $f to disable qt.conf"
+          } else {
+            Write-Host "No qt.conf rule matched in $f (nothing changed)"
+          }
+        }
+        
+        # 7) Remove the actual file from the repo tree (optional but matches 'remove everywhere')
+        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
+        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
         Write-Host "Source patched (includes + GL compat)."
 
     - name: Build Jellyfin Desktop
