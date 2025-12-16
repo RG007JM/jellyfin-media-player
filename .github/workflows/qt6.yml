@@ -202,7 +202,7 @@ jobs:
           }
         }
 
-        # 6) Windows SMTC injection (store WinRT object by value; PlayerComponent is NOT QObject => no QPointer)
+        # 6) Windows SMTC injection (fix LNK2019 TypedEventHandler by including Windows.Foundation)
           $hPath   = "src/player/WindowsSmtc.h"
           $cppPath = "src/player/WindowsSmtc.cpp"
           
@@ -212,6 +212,7 @@ jobs:
             '#include <QVariantMap>'
             ''
             '#include <winrt/base.h>'
+            '#include <winrt/Windows.Foundation.h>'
             '#include <winrt/Windows.Media.h>'
             ''
             'class PlayerComponent;'
@@ -249,6 +250,7 @@ jobs:
             '#include <windows.h>'
             ''
             'using namespace winrt;'
+            'using namespace winrt::Windows::Foundation;'
             'using namespace winrt::Windows::Media;'
             ''
             'struct __declspec(uuid("dd151aac-98d0-4e70-a75f-6f03f39f2b4a")) ISystemMediaTransportControlsInterop : ::IUnknown'
@@ -282,22 +284,25 @@ jobs:
             '    smtc.IsNextEnabled(true);'
             '    smtc.IsPreviousEnabled(true);'
             ''
-            '    smtc.ButtonPressed([this](auto const&, SystemMediaTransportControlsButtonPressedEventArgs const& args) {'
+            '    // IMPORTANT: explicit TypedEventHandler + Foundation header avoids LNK2019 on some toolchains'
+            '    smtc.ButtonPressed(TypedEventHandler<SystemMediaTransportControls, SystemMediaTransportControlsButtonPressedEventArgs>('
+            '      [this](SystemMediaTransportControls const&, SystemMediaTransportControlsButtonPressedEventArgs const& args) {'
             '        if (!m_player) return;'
             '        switch (args.Button()) {'
             '        case SystemMediaTransportControlsButton::Play:'
-            '            QMetaObject::invokeMethod(m_player, "play", Qt::QueuedConnection); break;'
+            '          QMetaObject::invokeMethod(m_player, "play", Qt::QueuedConnection); break;'
             '        case SystemMediaTransportControlsButton::Pause:'
-            '            QMetaObject::invokeMethod(m_player, "pause", Qt::QueuedConnection); break;'
+            '          QMetaObject::invokeMethod(m_player, "pause", Qt::QueuedConnection); break;'
             '        case SystemMediaTransportControlsButton::Stop:'
-            '            QMetaObject::invokeMethod(m_player, "stop", Qt::QueuedConnection); break;'
+            '          QMetaObject::invokeMethod(m_player, "stop", Qt::QueuedConnection); break;'
             '        case SystemMediaTransportControlsButton::Next:'
-            '            QMetaObject::invokeMethod(m_player, "next", Qt::QueuedConnection); break;'
+            '          QMetaObject::invokeMethod(m_player, "next", Qt::QueuedConnection); break;'
             '        case SystemMediaTransportControlsButton::Previous:'
-            '            QMetaObject::invokeMethod(m_player, "previous", Qt::QueuedConnection); break;'
+            '          QMetaObject::invokeMethod(m_player, "previous", Qt::QueuedConnection); break;'
             '        default: break;'
             '        }'
-            '    });'
+            '      }'
+            '    ));'
             ''
             '    m_smtc = smtc;'
             '    m_inited = true;'
@@ -330,7 +335,6 @@ jobs:
             ''
           ) -join "`r`n"
           Set-Content -Path $cppPath -Value $cpp -Encoding UTF8
-
 
         # 6b) Patch src/CMakeLists.txt to compile & link it into jmp_core (plain signature)
         $t = Get-Content $cmakeFile -Raw -Encoding UTF8
