@@ -250,53 +250,39 @@ jobs:
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
 
 
-        # 8) HDR/SDR: apply sane SDR defaults automatically (before manual otherconf)
-        # Patch src/player/PlayerComponent.cpp :: setOtherConfiguration()
-        
+        # 8) HDR/SDR: prepend default mpv options into "otherConfiguration" string
+        # This avoids referencing mmpv directly (fixes C2065).
         $pc = "src/player/PlayerComponent.cpp"
-        if (-not (Test-Path $pc)) {
-          throw "Cannot patch HDR defaults: missing $pc"
-        }
+        if (-not (Test-Path $pc)) { throw "Missing $pc" }
         
-        $src = Get-Content $pc -Raw -Encoding UTF8
+        $src  = Get-Content $pc -Raw -Encoding UTF8
         $orig = $src
         
-        # Inject defaults at the top of setOtherConfiguration(), right after the mmpv null-check.
-        # This keeps it idempotent by checking for a marker comment.
         if ($src -notmatch "CI PATCH: SDR tonemap defaults") {
         
-          $needle = 'void\s+PlayerComponent::setOtherConfiguration\s*\(\s*\)\s*\{\s*(?:\r?\n)+\s*QString\s+otherConfiguration'
-          if ($src -notmatch $needle) {
-            throw "Cannot find setOtherConfiguration() header/first line layout to patch"
-          }
+          # Find the line: QString otherConfiguration = SettingsComponentGet.value(...).toString();
+          $pattern = '(?m)^(?<indent>\s*)QString\s+otherConfiguration\s*=\s*SettingsComponentGet\.value\([^\)]*\)\.toString\(\)\s*;\s*$'
+          if ($src -notmatch $pattern) { throw "Could not find otherConfiguration assignment to patch" }
         
-          # Insert block immediately before "QString otherConfiguration = ..."
-          $insert = @'
-            // CI PATCH: SDR tonemap defaults (fix washed-out HDR on SDR displays)
-            // NOTE: Proper HDR display detection should disable these on HDR output.
-            // For now this improves SDR behavior out-of-the-box; manual config still overrides below.
-            if (mmpv) {
-              mmpv->setProperty("profile", "high-quality");
-              mmpv->setProperty("tone-mapping", "bt.2390");
-              mmpv->setProperty("gamut-mapping-mode", "clip");
-            }
-        
-        '@
-        
-          $src = [regex]::Replace(
-            $src,
-            '(void\s+PlayerComponent::setOtherConfiguration\s*\(\s*\)\s*\{\s*(?:\r?\n)+\s*)(QString\s+otherConfiguration)',
-            "`$1$insert`$2",
-            1
-          )
+          $src = [regex]::Replace($src, $pattern, {
+            param($m)
+            $indent = $m.Groups["indent"].Value
+            @(
+              $m.Value
+              "${indent}// CI PATCH: SDR tonemap defaults (fix washed-out HDR on SDR displays)"
+              "${indent}// NOTE: This is unconditional for now; proper HDR detection should disable on HDR output."
+              "${indent}otherConfiguration = QStringLiteral(""profile=high-quality`tone-mapping=bt.2390`t`ngamut-mapping-mode=clip`t`n"") + otherConfiguration;"
+            ) -join "`r`n"
+          }, 1)
         }
         
         if ($src -ne $orig) {
           Set-Content -Path $pc -Value $src -Encoding UTF8
-          Write-Host "Patched HDR->SDR defaults into $pc"
+          Write-Host "Patched $pc: prepended SDR tonemapping defaults into otherConfiguration"
         } else {
-          Write-Host "HDR patch already present (or no changes needed)"
+          Write-Host "HDR defaults patch already present (or nothing changed)"
         }
+
 
 
 
