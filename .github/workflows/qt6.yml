@@ -15,6 +15,13 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Nuke MinGW and Path Contamination
+      shell: pwsh
+      run: |
+        $path = $env:Path -split ';' | Where-Object { $_ -notmatch 'mingw' -and $_ -notmatch 'strawberry' }
+        [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
+        echo "Cleaned Path: $env:Path"
+
     - name: Install Qt 6.8.0
       uses: jurplel/install-qt-action@v4
       with:
@@ -22,14 +29,13 @@ jobs:
         arch: "win64_msvc2022_64"
         modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning qtshadertools qt5compat qtimageformats qtserialport"
 
-    - name: Setup Build Environment (Ninja, Dirs, Reuse)
+    - name: Setup Build Environment
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        mkdir dep-install
+        mkdir dep-install\bin
         mkdir dep-install\include
         mkdir dep-install\lib
-        mkdir dep-install\bin
         
         curl -L https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip -o ninja.zip
         tar -xf ninja.zip -C dep-install\bin
@@ -42,31 +48,17 @@ jobs:
       shell: pwsh
       run: |
         $url = "https://sdk.lunarg.com/sdk/download/1.3.296.0/windows/VulkanSDK-1.3.296.0-Installer.exe"
-        $out = "VulkanSDK.exe"
-        
-        Invoke-WebRequest -Uri $url -OutFile $out -UserAgent "curl/7.88.1"
-        Start-Process -FilePath .\$out -ArgumentList "--root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install" -Wait
-        
-        if (Test-Path "C:\VulkanSDK\Bin") {
-            $sdkRoot = "C:\VulkanSDK"
-        } else {
-            $sdkRoot = Get-ChildItem "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
-        }
-        
-        echo "VULKAN_SDK=$sdkRoot" >> $env:GITHUB_ENV
-        echo "VK_SDK_PATH=$sdkRoot" >> $env:GITHUB_ENV
-        echo "$sdkRoot\Bin" >> $env:GITHUB_PATH
-        Remove-Item $out
+        Invoke-WebRequest -Uri $url -OutFile "VulkanSDK.exe"
+        Start-Process -FilePath .\VulkanSDK.exe -ArgumentList "--root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install" -Wait
+        echo "VULKAN_SDK=C:\VulkanSDK" >> $env:GITHUB_ENV
+        echo "C:\VulkanSDK\Bin" >> $env:GITHUB_PATH
+        Remove-Item VulkanSDK.exe
 
     - name: Prepare Libmpv (Stable 20240922)
       shell: pwsh
       run: |
-        # CHANGED: Using specific stable snapshot provided by user to prevent crash
         $url = "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z/download"
-        Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 5
-        
-        if ((Get-Item mpv.7z).Length -lt 1000) { throw "Download failed (file too small)" }
-        
+        Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -MaximumRedirection 5
         7z x mpv.7z -ompv
         Set-Location mpv
         
@@ -82,16 +74,13 @@ jobs:
     - name: Prepare SDL2
       shell: pwsh
       run: |
-        $url = "https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip"
-        Invoke-WebRequest -Uri $url -OutFile "sdl2.zip"
-        Expand-Archive -Path "sdl2.zip" -DestinationPath "sdl2-temp" -Force
+        Invoke-WebRequest -Uri "https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip" -OutFile "sdl2.zip"
+        Expand-Archive "sdl2.zip" -DestinationPath "sdl2-temp" -Force
         $root = (Get-ChildItem "sdl2-temp" | Select-Object -First 1).FullName
-        
         Copy-Item -Recurse -Force "$root\include\*" "dep-install\include\"
         Copy-Item -Force "$root\lib\x64\SDL2.lib" "dep-install\lib\"
         Copy-Item -Force "$root\lib\x64\SDL2main.lib" "dep-install\lib\"
         Copy-Item -Force "$root\lib\x64\SDL2.dll" "dep-install\bin\"
-        Remove-Item -Recurse -Force "sdl2-temp", "sdl2.zip"
 
     - name: Prepare ECM and MpvQt
       shell: cmd
@@ -115,13 +104,7 @@ jobs:
         echo. >> src\mpvcontroller.cpp
         echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
         
-        rem --- FORCE INCLUDE PATH FOR MPVQT ---
-        cmake -B build -GNinja ^
-          -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" ^
-          -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" ^
-          -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" ^
-          -DCMAKE_CXX_FLAGS="-I\"%INCLUDE_DIR_FWD%\""
-          
+        cmake -B build -GNinja -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" -DCMAKE_CXX_FLAGS="-I\"%INCLUDE_DIR_FWD%\""
         ninja -C build install
         cd ..
 
@@ -129,15 +112,13 @@ jobs:
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Force -Path bundle/win
-        Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "bundle/win/vcredist_x64.exe" -UserAgent "curl/7.88.1"
+        Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "bundle/win/vcredist_x64.exe"
         
-        $sslUrl = "https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-3.6.0.zip"
-        Invoke-WebRequest -Uri $sslUrl -OutFile "openssl.zip" -UserAgent "Mozilla/5.0"
-        Expand-Archive -Path "openssl.zip" -DestinationPath "openssl-temp" -Force
+        Invoke-WebRequest -Uri "https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-3.6.0.zip" -OutFile "openssl.zip"
+        Expand-Archive "openssl.zip" -DestinationPath "openssl-temp" -Force
         $binPath = (Get-ChildItem -Path "openssl-temp" -Recurse -Filter "libssl-3-x64.dll" | Select-Object -First 1).DirectoryName
         Copy-Item "$binPath\libssl-3-x64.dll" "dep-install\bin\"
         Copy-Item "$binPath\libcrypto-3-x64.dll" "dep-install\bin\"
-        Remove-Item -Recurse -Force "openssl-temp", "openssl.zip"
 
     - name: Patch WiX Bundle.wxs
       shell: pwsh
@@ -170,41 +151,12 @@ jobs:
         set(MPV_INCLUDE_DIRS "$incMpv")
         if(NOT TARGET MPV::MPV)
           add_library(MPV::MPV UNKNOWN IMPORTED)
-          set_target_properties(MPV::MPV PROPERTIES
-            IMPORTED_LOCATION "$libMpv"
-            INTERFACE_INCLUDE_DIRECTORIES "$incMpv"
-          )
+          set_target_properties(MPV::MPV PROPERTIES IMPORTED_LOCATION "$libMpv" INTERFACE_INCLUDE_DIRECTORIES "$incMpv")
         endif()
         "@
         Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
-        # --- PATCHES (Simplified Syntax) ---
-        $f='src/CMakeLists.txt'
-        (Get-Content $f) | Where-Object { 
-            $_ -notmatch 'mpris/MprisComponent' -and 
-            $_ -notmatch 'add_subdirectory.mpris.' -and 
-            $_ -notmatch 'Qt6::DBus' 
-        } | Set-Content $f
-
-        $f='src/core/ComponentManager.cpp'
-        (Get-Content $f) | Where-Object { $_ -notmatch 'MprisComponent' } | Set-Content $f
-        if (Test-Path src\mpris) { Remove-Item -Recurse -Force src\mpris }
-        
-        $f='src/CMakeLists.txt'
-        (Get-Content $f) | Where-Object { $_ -notmatch 'taskbar' -and $_ -notmatch 'TaskbarComponent' } | Set-Content $f
-        
-        $f='src/core/ComponentManager.cpp'
-        (Get-Content $f) | Where-Object { $_ -notmatch 'TaskbarComponent' } | Set-Content $f
-        
-        $f='src/ui/WindowManager.cpp'
-        (Get-Content $f) | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'm_taskbar' } | Set-Content $f
-        if (Test-Path src\taskbar) { Remove-Item -Recurse -Force src\taskbar }
-
-        if (Test-Path tests/CMakeLists.txt) { 
-            $f='tests/CMakeLists.txt'
-            (Get-Content $f) | Where-Object { $_ -notmatch 'TaskbarComponent' -and $_ -notmatch 'MprisComponent' } | Set-Content $f
-        }
-        
+        # --- PATCHES ---
         $f='src/player/CodecsComponent.cpp'
         $c=Get-Content $f -Raw
         $c='#include <windows.h>' + [Environment]::NewLine + $c
@@ -215,77 +167,48 @@ jobs:
         if ($LASTEXITCODE -ne 0) { exit 1 }
         
         Set-Location build
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja"
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
 
-    - name: Deploy Qt and Finalize Dependencies
+    - name: Deploy Qt and Finalize
       shell: pwsh
       run: |
         $outDir = "$((Get-Location).Path)/output"
         $depInstall = "$((Get-Location).Path)/dep-install"
         $qtBin = "$env:Qt6_DIR/bin"
         
-        Write-Host "Deploying to: $outDir"
         if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
         
-        # --- FIX: Pass MpvQt QML Import Path Conditionally ---
-        $exePath = "$outDir/Jellyfin Desktop.exe"
-        $mpvQmlPath = "$depInstall/lib/qml"
-        $qmlArgs = @()
-        if (Test-Path $mpvQmlPath) {
-             $qmlArgs += "--qmlimport"
-             $qmlArgs += "$mpvQmlPath"
-        } elseif (Test-Path "$depInstall/qml") {
-             $qmlArgs += "--qmlimport"
-             $qmlArgs += "$depInstall/qml"
-        } else {
-             Write-Warning "No MpvQt QML module found."
+        # 1. PRE-COPY QT DLLS (Brute Force)
+        Write-Host "Forcing Qt DLL copy..."
+        $qtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll")
+        foreach ($q in $qtDlls) {
+            Copy-Item -Force "$qtBin\$q" $outDir
         }
+
+        # 2. COPY DEPENDENCIES
+        Copy-Item -Force "$depInstall/bin/*.dll" $outDir
+
+        # 3. WINDEPLOYQT (Plugins only)
+        $exePath = "$outDir/Jellyfin Desktop.exe"
+        $qmlArgs = @()
+        if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
         
         Write-Host "Running windeployqt..."
-        & "windeployqt" --release --force `
-            --qmldir src/ui `
-            @qmlArgs `
-            --compiler-runtime `
-            --no-opengl-sw `
-            --xml "$exePath"
+        & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --no-opengl-sw --xml "$exePath"
             
-        # --- FIX: Robust VC Redist Copy ---
-        Write-Host "Locating correct x64 VC Redist..."
+        # 4. VCRUNTIME (Manual)
         $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
         $runtimeDll = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
-        
-        if (-not $runtimeDll) { throw "Could not locate x64 VC Redist directory!" }
         $redistDir = $runtimeDll.DirectoryName
-        Write-Host "Source Redist Dir: $redistDir"
+        Copy-Item -Force "$redistDir\*.dll" $outDir
+
+        # 5. DIAGNOSTICS
+        Write-Host "--- Content of Output Dir ---"
+        Get-ChildItem $outDir | Select-Object Name
         
-        $dlls = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll")
-        foreach ($dll in $dlls) {
-            $src = "$redistDir\$dll"
-            if (Test-Path $src) { Copy-Item -Force $src "$outDir\" }
-        }
-
-        # --- Manual Dependency Safety Net ---
-        $thirdPartyDeps = @(
-            @{ Name="libssl-3-x64.dll"; Path="$depInstall/bin/libssl-3-x64.dll" },
-            @{ Name="libcrypto-3-x64.dll"; Path="$depInstall/bin/libcrypto-3-x64.dll" },
-            @{ Name="libmpv-2.dll"; Path="$depInstall/bin/libmpv-2.dll" },
-            @{ Name="SDL2.dll"; Path="$depInstall/bin/SDL2.dll" },
-            @{ Name="MpvQt.dll"; Path="$depInstall/bin/MpvQt.dll" }
-        )
-        foreach ($dep in $thirdPartyDeps) {
-            if (Test-Path $dep.Path) { Copy-Item -Force $dep.Path $outDir }
-            else { Write-Error "CRITICAL: Missing dependency $($dep.Name)" }
-        }
-
-        # --- QT Safety Copy ---
-        $criticalQtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll")
-        foreach ($qDll in $criticalQtDlls) {
-            if (-not (Test-Path "$outDir\$qDll")) {
-                Write-Warning "Windeployqt missed $qDll. Force copying..."
-                Copy-Item -Force "$qtBin\$qDll" $outDir
-            }
-        }
+        # 6. VERIFY ARCHITECTURE
+        Write-Host "--- Checking DLL Architecture ---"
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /headers output\Qt6Quick.dll | findstr machine"
 
     - name: Create Portable Zip
       shell: pwsh
