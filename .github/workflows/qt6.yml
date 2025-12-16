@@ -133,7 +133,7 @@ jobs:
             Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (MPRIS, Taskbar, Tests)
+    - name: Patch Source Code (MPRIS, Taskbar, Tests, Rendering)
       shell: pwsh
       run: |
         # 1. Patch src/CMakeLists.txt - Remove MPRIS, DBus, and Taskbar
@@ -165,7 +165,19 @@ jobs:
         $c = '#include <windows.h>' + [Environment]::NewLine + $c
         Set-Content $codecs $c -Encoding UTF8
         
-        # 5. Delete directories to ensure they aren't compiled
+        # 5. FORCE OPENGL RENDERING in src/main.cpp (Fix for Black Screen)
+        $mainCpp = "src/main.cpp"
+        if (Test-Path $mainCpp) {
+            $mainContent = Get-Content $mainCpp -Raw
+            # Add includes
+            $mainContent = "#include <QQuickWindow>`r`n#include <QSGRendererInterface>`r`n" + $mainContent
+            # Add setGraphicsApi call at start of main
+            $mainContent = $mainContent -replace 'int main\(int argc, char \*argv\[\]\)\s*\{', 'int main(int argc, char *argv[]) {`r`n    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);`r`n'
+            Set-Content $mainCpp $mainContent -Encoding UTF8
+            Write-Host "Patched src/main.cpp to force OpenGL rendering."
+        }
+
+        # 6. Delete directories to ensure they aren't compiled
         if (Test-Path "src/mpris") { Remove-Item -Path "src/mpris" -Recurse -Force }
         if (Test-Path "src/taskbar") { Remove-Item -Path "src/taskbar" -Recurse -Force }
 
@@ -195,94 +207,8 @@ jobs:
         Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
         # --- CMAKE & NINJA ---
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" -DBUILD_TESTING=OFF ."
         if ($LASTEXITCODE -ne 0) { exit 1 }
         
         Set-Location build
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
-
-    - name: Deploy Qt and Finalize
-      shell: pwsh
-      run: |
-        $outDir = "$((Get-Location).Path)/output"
-        $depInstall = "$((Get-Location).Path)/dep-install"
-        
-        if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
-        
-        # --- FIX: Locate Qt Binaries Correctly ---
-        # 1. Try environment variables
-        $qtBin = $env:Qt6_DIR + "/bin"
-        if (-not (Test-Path $qtBin)) {
-            # 2. Try locating windeployqt
-            $windeploy = Get-Command windeployqt -ErrorAction SilentlyContinue
-            if ($windeploy) {
-                $qtBin = $windeploy.Source | Split-Path | Split-Path
-                $qtBin = "$qtBin/bin"
-            } else {
-                # 3. Fallback to hardcoded assumption if all else fails (dangerous but often correct for this runner)
-                $qtBin = "D:/a/jellyfin-media-player/Qt/6.8.0/msvc2022_64/bin"
-            }
-        }
-        Write-Host "Detected Qt Bin Path: $qtBin"
-        if (-not (Test-Path $qtBin)) { throw "Could not locate Qt Binaries at $qtBin" }
-
-        # 1. PRE-COPY QT DLLS (Brute Force)
-        Write-Host "Forcing Qt DLL copy..."
-        $qtDlls = @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Quick.dll", "Qt6Qml.dll", "Qt6Svg.dll", "Qt6OpenGL.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll")
-        foreach ($q in $qtDlls) {
-            $src = "$qtBin\$q"
-            if (Test-Path $src) {
-                Copy-Item -Force $src $outDir
-            } else {
-                Write-Warning "Could not find $src to copy."
-            }
-        }
-
-        # 2. COPY DEPENDENCIES
-        Copy-Item -Force "$depInstall/bin/*.dll" $outDir
-
-        # 3. WINDEPLOYQT (Plugins only)
-        $exePath = "$outDir/Jellyfin Desktop.exe"
-        $qmlArgs = @()
-        if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
-        
-        Write-Host "Running windeployqt..."
-        & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --no-opengl-sw --xml "$exePath"
-            
-        # 4. VCRUNTIME (Manual)
-        $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
-        $runtimeDll = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
-        $redistDir = $runtimeDll.DirectoryName
-        Copy-Item -Force "$redistDir\*.dll" $outDir
-
-        # 5. DIAGNOSTICS
-        Write-Host "--- Content of Output Dir ---"
-        Get-ChildItem $outDir | Select-Object Name
-        
-        # 6. VERIFY ARCHITECTURE
-        Write-Host "--- Checking DLL Architecture ---"
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /headers output\Qt6Quick.dll | findstr machine"
-
-    - name: Create Portable Zip
-      shell: pwsh
-      run: Compress-Archive -Path output\* -DestinationPath Jellyfin-Desktop-Portable.zip
-
-    - name: Upload Portable Zip
-      uses: actions/upload-artifact@v4
-      with:
-        name: jellyfin-desktop-portable
-        path: Jellyfin-Desktop-Portable.zip
-
-    - name: Build Installer Package
-      shell: cmd
-      run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
-        cd build
-        ninja windows_package
-
-    - name: Archive installer
-      uses: actions/upload-artifact@v4
-      with:
-        name: jellyfin-desktop-windows
-        path: build/JellyfinDesktop-*.exe
+        cmd.
