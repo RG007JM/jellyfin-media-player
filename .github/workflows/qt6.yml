@@ -10,9 +10,8 @@ jobs:
   build-win64:
     runs-on: windows-latest
 
-    # Force OpenGL renderer (needed for QQuickFramebufferObject video path).
     env:
-      # QSG_RHI_BACKEND: opengl
+      #QSG_RHI_BACKEND: opengl
       QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
 
     steps:
@@ -203,7 +202,7 @@ jobs:
           }
         }
 
-        # 6) Windows SMTC injection (no QObject/Q_OBJECT => no moc dependency)
+        # 6) Windows SMTC injection (store WinRT object by value; never 'new' it)
         $hPath   = "src/player/WindowsSmtc.h"
         $cppPath = "src/player/WindowsSmtc.cpp"
 
@@ -212,6 +211,9 @@ jobs:
           '#ifdef _WIN32'
           '#include <QVariantMap>'
           '#include <QPointer>'
+          ''
+          '#include <winrt/base.h>'
+          '#include <winrt/Windows.Media.h>'
           ''
           'class PlayerComponent;'
           'class QQuickWindow;'
@@ -229,7 +231,7 @@ jobs:
           'private:'
           '    bool m_inited{false};'
           '    QPointer<PlayerComponent> m_player;'
-          '    void* m_smtc{nullptr}; // winrt::Windows::Media::SystemMediaTransportControls*'
+          '    winrt::Windows::Media::SystemMediaTransportControls m_smtc{ nullptr };'
           '};'
           '#endif'
           ''
@@ -246,13 +248,8 @@ jobs:
           ''
           '#include <windows.h>'
           ''
-          '#include <winrt/base.h>'
-          '#include <winrt/Windows.Media.h>'
-          ''
           'using namespace winrt;'
           'using namespace winrt::Windows::Media;'
-          ''
-          'class PlayerComponent;'
           ''
           'struct __declspec(uuid("dd151aac-98d0-4e70-a75f-6f03f39f2b4a")) ISystemMediaTransportControlsInterop : ::IUnknown'
           '{'
@@ -268,10 +265,12 @@ jobs:
           '{'
           '    if (m_inited) return true;'
           '    m_player = player;'
+          ''
           '    HWND hwnd = hwndFromQtWindow(window);'
           '    if (!hwnd) return false;'
           ''
           '    winrt::init_apartment(winrt::apartment_type::single_threaded);'
+          ''
           '    auto interop = winrt::get_activation_factory<SystemMediaTransportControls, ISystemMediaTransportControlsInterop>();'
           '    SystemMediaTransportControls smtc{ nullptr };'
           '    winrt::check_hresult(interop->GetForWindow(hwnd, winrt::guid_of<SystemMediaTransportControls>(), winrt::put_abi(smtc)));'
@@ -300,33 +299,30 @@ jobs:
           '        }'
           '    });'
           ''
-          '    m_smtc = new SystemMediaTransportControls(smtc);'
+          '    m_smtc = smtc;'
           '    m_inited = true;'
           '    return true;'
           '}'
           ''
-          'static SystemMediaTransportControls* asSmtc(void* p)'
-          '{'
-          '    return reinterpret_cast<SystemMediaTransportControls*>(p);'
-          '}'
-          ''
-          'void WindowsSmtc::setPlaybackStatePlaying() { if (!m_smtc) return; asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Playing); }'
-          'void WindowsSmtc::setPlaybackStatePaused()  { if (!m_smtc) return; asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Paused);  }'
-          'void WindowsSmtc::setPlaybackStateStopped() { if (!m_smtc) return; asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Stopped); }'
+          'void WindowsSmtc::setPlaybackStatePlaying() { if (!m_inited) return; m_smtc.PlaybackStatus(MediaPlaybackStatus::Playing); }'
+          'void WindowsSmtc::setPlaybackStatePaused()  { if (!m_inited) return; m_smtc.PlaybackStatus(MediaPlaybackStatus::Paused);  }'
+          'void WindowsSmtc::setPlaybackStateStopped() { if (!m_inited) return; m_smtc.PlaybackStatus(MediaPlaybackStatus::Stopped); }'
           ''
           'void WindowsSmtc::setMetadata(const QVariantMap& md)'
           '{'
-          '    if (!m_smtc) return;'
-          '    auto smtc = *asSmtc(m_smtc);'
-          '    auto updater = smtc.DisplayUpdater();'
+          '    if (!m_inited) return;'
+          '    auto updater = m_smtc.DisplayUpdater();'
           '    updater.Type(MediaPlaybackType::Music);'
           '    auto music = updater.MusicProperties();'
+          ''
           '    const auto title  = md.value("title").toString();'
           '    const auto artist = md.value("artist").toString();'
           '    const auto album  = md.value("album").toString();'
+          ''
           '    if (!title.isEmpty())  music.Title(title.toStdWString());'
           '    if (!artist.isEmpty()) music.Artist(artist.toStdWString());'
           '    if (!album.isEmpty())  music.AlbumTitle(album.toStdWString());'
+          ''
           '    updater.Update();'
           '}'
           ''
@@ -445,7 +441,6 @@ jobs:
         $mpvQtDir = "$depInstall/lib/cmake/MpvQt"
         $installPrefix = "$root/output"
 
-        # --- OVERRIDE FindMPV.cmake (no here-strings) ---
         $cmakeMod = "CMakeModules/FindMPV.cmake"
         $overrideContent = @(
           'set(MPV_FOUND TRUE)'
@@ -473,7 +468,6 @@ jobs:
         $depInstall = "$((Get-Location).Path)/dep-install"
         if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
 
-        # Locate Qt binaries
         $qtBin = $env:Qt6_DIR + "/bin"
         if (-not (Test-Path $qtBin)) {
           $windeploy = Get-Command windeployqt -ErrorAction SilentlyContinue
@@ -487,7 +481,6 @@ jobs:
         Write-Host "Detected Qt Bin Path: $qtBin"
         $qtRoot = Split-Path $qtBin -Parent
 
-        # Pre-copy core DLLs
         Write-Host "Forcing Qt DLL copy..."
         $qtDlls = @(
           "Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Network.dll",
@@ -500,7 +493,6 @@ jobs:
           if (Test-Path $src) { Copy-Item -Force $src $outDir } else { Write-Warning "Could not find $src" }
         }
 
-        # WebEngine resources + process
         Write-Host "Manually copying WebEngine Resources..."
         $resSrc = "$qtRoot/resources"
         if (Test-Path $resSrc) {
@@ -510,21 +502,16 @@ jobs:
         $processExe = "$qtBin\QtWebEngineProcess.exe"
         if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
 
-        # Dependencies
         Copy-Item -Force "$depInstall/bin/*.dll" $outDir
 
-        # windeployqt
         $exePath = "$outDir/Jellyfin Desktop.exe"
         $qmlArgs = @()
         if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
-        Write-Host "Running windeployqt..."
         & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
 
-        # Remove qt.conf/.qt.conf
         Remove-Item -Force -ErrorAction SilentlyContinue "$outDir\qt.conf"
         Remove-Item -Force -ErrorAction SilentlyContinue "$outDir\.qt.conf"
 
-        # VCRUNTIME manual copy
         $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
         $runtimeDll = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
         if ($runtimeDll) {
@@ -532,7 +519,6 @@ jobs:
           Copy-Item -Force "$redistDir\*.dll" $outDir
         }
 
-        Write-Host "--- Content of Output Dir ---"
         Get-ChildItem $outDir | Select-Object Name
 
     - name: Create Portable Zip
