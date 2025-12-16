@@ -12,20 +12,13 @@ jobs:
 
     # Force OpenGL renderer (needed for QQuickFramebufferObject video path).
     env:
-      # QSG_RHI_BACKEND: opengl
+      QSG_RHI_BACKEND: opengl
       QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
 
     steps:
     - uses: actions/checkout@v4
       with:
         submodules: recursive
-
-    - name: Remove bundled qt.conf (source)
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = "Stop"
-        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
-        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
 
     - name: Nuke MinGW and Path Contamination
       shell: pwsh
@@ -135,114 +128,324 @@ jobs:
           Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (Include Fix + GL Compat)
+    - name: Patch Source Code (Include Fix + GL Compat + Windows SMTC)
       shell: pwsh
       run: |
-        # 1) Patch src/CMakeLists.txt
+        $ErrorActionPreference = "Stop"
+
+        # 1) Patch src/CMakeLists.txt (remove linux-only components for Windows build)
         $cmakeFile = "src/CMakeLists.txt"
-        $content = Get-Content $cmakeFile -Raw
-        $content = [regex]::Replace($content, '(?mi)^.*mpris.*$', '')
-        $content = [regex]::Replace($content, '(?mi)^.*taskbar.*$', '')
+        $content = Get-Content $cmakeFile -Raw -Encoding UTF8
+        $content = [regex]::Replace($content, '(?mi)^\s*add_subdirectory\(\s*taskbar\s*\)\s*$', '')
+        $content = [regex]::Replace($content, '(?mi)^\s*add_subdirectory\(\s*mpris\s*\)\s*$', '')
         $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
         Set-Content $cmakeFile $content -Encoding UTF8
 
-        # 2) Patch src/core/ComponentManager.cpp
+        # 2) Patch src/core/ComponentManager.cpp (remove includes/refs)
         $compMgr = "src/core/ComponentManager.cpp"
-        $compContent = Get-Content $compMgr -Raw
+        $compContent = Get-Content $compMgr -Raw -Encoding UTF8
         $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*MprisComponent\.h.*$', '')
         $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*TaskbarComponent\.h.*$', '')
         $compContent = [regex]::Replace($compContent, '(?mi)^.*MprisComponent.*$', '')
         $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
         Set-Content $compMgr $compContent -Encoding UTF8
 
-        # 3) Patch src/ui/WindowManager.cpp
+        # 3) Patch src/ui/WindowManager.cpp (remove Taskbar usage)
         $winMgr = "src/ui/WindowManager.cpp"
         if (Test-Path $winMgr) {
-          $winContent = Get-Content $winMgr -Raw
+          $winContent = Get-Content $winMgr -Raw -Encoding UTF8
           $winContent = [regex]::Replace($winContent, '(?mi)^.*TaskbarComponent.*$', '')
           Set-Content $winMgr $winContent -Encoding UTF8
         }
 
         # 4) CodecsComponent.cpp: ensure windows.h is included (idempotent)
         $codecs = "src/player/CodecsComponent.cpp"
-        $c = Get-Content $codecs -Raw
-        if ($c -notmatch '#include\s+<windows\.h>') {
-          $c = '#include <windows.h>' + [Environment]::NewLine + $c
-          Set-Content $codecs $c -Encoding UTF8
+        $cc = Get-Content $codecs -Raw -Encoding UTF8
+        if ($cc -notmatch '#include\s+<windows\.h>') {
+          $cc = '#include <windows.h>' + [Environment]::NewLine + $cc
+          Set-Content $codecs $cc -Encoding UTF8
         }
 
+        # 5) main.cpp: force Desktop OpenGL + CompatibilityProfile (idempotent)
+        $main = "src/main.cpp"
+        if (Test-Path $main) {
+          $m = Get-Content $main -Raw -Encoding UTF8
+          if ($m -notmatch "forceCompatOpenGL") {
 
-        # 6) Remove qt.conf install + generation (required if qt.conf is deleted everywhere)
-        $filesToPatch = @(
-          "CMakeModules/CPackConfiguration.cmake",
-          "CMakeModules/QtConfiguration.cmake"
-        )
-        
-        foreach ($f in $filesToPatch) {
-          if (-not (Test-Path $f)) { continue }
-        
-          $t = Get-Content $f -Raw -Encoding UTF8
-          $orig = $t
-        
-          # Remove the CPack install rule that installs bundle/win/qt.conf
-          $t = [regex]::Replace($t,
-            '(?mi)^\s*install\s*\(\s*FILES\s+\$\{CMAKE_SOURCE_DIR\}/bundle/win/qt\.conf\s+DESTINATION\s+\.\s*\)\s*$',
-            '# (CI patch) qt.conf disabled: install(FILES ${CMAKE_SOURCE_DIR}/bundle/win/qt.conf DESTINATION .)'
-          )
-        
-          # Remove/disable the QtConfiguration rule that writes qt.conf into QTROOT/bin
-          $t = [regex]::Replace($t,
-            '(?mi)^\s*file\s*\(\s*WRITE\s+\$\{QTROOT\}/bin/qt\.conf\s+\$\{QTCONFCONTENT\}\s*\)\s*$',
-            '# (CI patch) qt.conf disabled: file(WRITE ${QTROOT}/bin/qt.conf ${QTCONFCONTENT})'
-          )
-        
-          if ($t -ne $orig) {
-            Set-Content -Path $f -Value $t -Encoding UTF8
-            Write-Host "Patched $f to disable qt.conf"
-          } else {
-            Write-Host "No qt.conf rule matched in $f (nothing changed)"
+            if ($m -notmatch '#include\s+<QSurfaceFormat>') {
+              $m = "#include <QSurfaceFormat>`r`n" + $m
+            }
+            if ($m -notmatch '#include\s+<QCoreApplication>') {
+              $m = "#include <QCoreApplication>`r`n" + $m
+            }
+
+            $fn = @(
+              'static void forceCompatOpenGL()'
+              '{'
+              '    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);'
+              '    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);'
+              ''
+              '    QSurfaceFormat fmt;'
+              '    fmt.setRenderableType(QSurfaceFormat::OpenGL);'
+              '    fmt.setVersion(3, 3);'
+              '    fmt.setProfile(QSurfaceFormat::CompatibilityProfile);'
+              '    fmt.setDepthBufferSize(24);'
+              '    fmt.setStencilBufferSize(8);'
+              '    QSurfaceFormat::setDefaultFormat(fmt);'
+              '}'
+              ''
+              ''
+            ) -join "`r`n"
+
+            $rxMain = [regex]::new("(?m)^\s*int\s+main\s*\(")
+            $m = $rxMain.Replace($m, $fn + "int main(", 1)
+            $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{)', '$1' + "`r`n    forceCompatOpenGL();", 1)
+
+            Set-Content $main $m -Encoding UTF8
           }
         }
-        
-        # 7) Remove the actual file from the repo tree (optional but matches 'remove everywhere')
-        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
-        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
 
+        # -----------------------------
+        # 6) Windows SMTC injection
+        # -----------------------------
+        $hPath = "src/player/WindowsSmtc.h"
+        $cppPath = "src/player/WindowsSmtc.cpp"
 
-        # 8) HDR/SDR: prepend default mpv options into "otherConfiguration" string
+        $h = @'
+#pragma once
+#ifdef _WIN32
+#include <QObject>
+#include <QVariantMap>
+#include <QPointer>
+
+class PlayerComponent;
+class QQuickWindow;
+
+class WindowsSmtc : public QObject
+{
+    Q_OBJECT
+public:
+    explicit WindowsSmtc(QObject* parent = nullptr);
+
+    bool initForWindow(QQuickWindow* window, PlayerComponent* player);
+
+    void setPlaybackStatePlaying();
+    void setPlaybackStatePaused();
+    void setPlaybackStateStopped();
+    void setMetadata(const QVariantMap& metadata);
+
+private:
+    bool m_inited{false};
+    QPointer<PlayerComponent> m_player;
+    void* m_smtc{nullptr}; // winrt::Windows::Media::SystemMediaTransportControls*
+};
+#endif
+'@
+        Set-Content -Path $hPath -Value $h -Encoding UTF8
+
+        $cpp = @'
+#ifdef _WIN32
+
+#include "WindowsSmtc.h"
+
+#include <QQuickWindow>
+#include <QVariantMap>
+#include <QCoreApplication>
+
+#include <windows.h>
+
+#include <winrt/base.h>
+#include <winrt/Windows.Media.h>
+
+using namespace winrt;
+using namespace winrt::Windows::Media;
+
+class PlayerComponent;
+
+struct __declspec(uuid("dd151aac-98d0-4e70-a75f-6f03f39f2b4a")) ISystemMediaTransportControlsInterop : ::IUnknown
+{
+    virtual HRESULT __stdcall GetForWindow(HWND appWindow, REFIID riid, void** result) = 0;
+};
+
+static HWND hwndFromQtWindow(QQuickWindow* w)
+{
+    return reinterpret_cast<HWND>(w ? w->winId() : 0);
+}
+
+WindowsSmtc::WindowsSmtc(QObject* parent) : QObject(parent) {}
+
+bool WindowsSmtc::initForWindow(QQuickWindow* window, PlayerComponent* player)
+{
+    if (m_inited)
+        return true;
+
+    m_player = player;
+
+    HWND hwnd = hwndFromQtWindow(window);
+    if (!hwnd)
+        return false;
+
+    winrt::init_apartment(winrt::apartment_type::single_threaded);
+
+    auto interop = winrt::get_activation_factory<SystemMediaTransportControls, ISystemMediaTransportControlsInterop>();
+    SystemMediaTransportControls smtc{ nullptr };
+    winrt::check_hresult(interop->GetForWindow(hwnd, winrt::guid_of<SystemMediaTransportControls>(), winrt::put_abi(smtc)));
+
+    smtc.IsEnabled(true);
+    smtc.IsPlayEnabled(true);
+    smtc.IsPauseEnabled(true);
+    smtc.IsStopEnabled(true);
+    smtc.IsNextEnabled(true);
+    smtc.IsPreviousEnabled(true);
+
+    smtc.ButtonPressed([this](auto const&, SystemMediaTransportControlsButtonPressedEventArgs const& args) {
+        if (!m_player)
+            return;
+
+        switch (args.Button())
+        {
+        case SystemMediaTransportControlsButton::Play:
+            QMetaObject::invokeMethod(m_player, "play", Qt::QueuedConnection);
+            break;
+        case SystemMediaTransportControlsButton::Pause:
+            QMetaObject::invokeMethod(m_player, "pause", Qt::QueuedConnection);
+            break;
+        case SystemMediaTransportControlsButton::Stop:
+            QMetaObject::invokeMethod(m_player, "stop", Qt::QueuedConnection);
+            break;
+        case SystemMediaTransportControlsButton::Next:
+            QMetaObject::invokeMethod(m_player, "next", Qt::QueuedConnection);
+            break;
+        case SystemMediaTransportControlsButton::Previous:
+            QMetaObject::invokeMethod(m_player, "previous", Qt::QueuedConnection);
+            break;
+        default:
+            break;
+        }
+    });
+
+    m_smtc = new SystemMediaTransportControls(smtc);
+    m_inited = true;
+    return true;
+}
+
+static SystemMediaTransportControls* asSmtc(void* p)
+{
+    return reinterpret_cast<SystemMediaTransportControls*>(p);
+}
+
+void WindowsSmtc::setPlaybackStatePlaying()
+{
+    if (!m_smtc) return;
+    asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Playing);
+}
+
+void WindowsSmtc::setPlaybackStatePaused()
+{
+    if (!m_smtc) return;
+    asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Paused);
+}
+
+void WindowsSmtc::setPlaybackStateStopped()
+{
+    if (!m_smtc) return;
+    asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Stopped);
+}
+
+void WindowsSmtc::setMetadata(const QVariantMap& md)
+{
+    if (!m_smtc) return;
+
+    auto smtc = *asSmtc(m_smtc);
+    auto updater = smtc.DisplayUpdater();
+    updater.Type(MediaPlaybackType::Music);
+
+    auto music = updater.MusicProperties();
+
+    const auto title  = md.value("title").toString();
+    const auto artist = md.value("artist").toString();
+    const auto album  = md.value("album").toString();
+
+    if (!title.isEmpty())  music.Title(title.toStdWString());
+    if (!artist.isEmpty()) music.Artist(artist.toStdWString());
+    if (!album.isEmpty())  music.AlbumTitle(album.toStdWString());
+
+    updater.Update();
+}
+
+#endif
+'@
+        Set-Content -Path $cppPath -Value $cpp -Encoding UTF8
+
+        # 6b) Patch src/CMakeLists.txt to compile & link it into jmp_core (correct for your CMake layout)
+        $t = Get-Content $cmakeFile -Raw -Encoding UTF8
+        if ($t -notmatch "CI PATCH: Windows SMTC") {
+          $append = @(
+            ''
+            '# CI PATCH: Windows SMTC'
+            'if(WIN32)'
+            '  target_sources(jmp_core PRIVATE player/WindowsSmtc.cpp)'
+            '  target_compile_features(jmp_core PRIVATE cxx_std_17)'
+            '  target_link_libraries(jmp_core PRIVATE runtimeobject)'
+            'endif()'
+            ''
+          ) -join "`r`n"
+          $t += $append
+          Set-Content $cmakeFile $t -Encoding UTF8
+        }
+
+        # 6c) Patch PlayerComponent.cpp to init and feed SMTC
         $pc = "src/player/PlayerComponent.cpp"
-        if (-not (Test-Path $pc)) { throw "Missing $pc" }
-        
-        $src  = Get-Content $pc -Raw -Encoding UTF8
-        $orig = $src
-        
-        if ($src -notmatch "CI PATCH: SDR tonemap defaults") {
-        
-          $pattern = '(?m)^(?<indent>\s*)QString\s+otherConfiguration\s*=\s*.*value\([^\)]*\).*toString\(\)\s*;\s*$'
-          if ($src -notmatch $pattern) { throw "Could not find otherConfiguration assignment to patch" }
-        
-          $src = [regex]::Replace($src, $pattern, {
-            param($m)
-            $indent = $m.Groups["indent"].Value
-            @(
-              $m.Value
-              "${indent}// CI PATCH: SDR tonemap defaults (fix washed-out HDR on SDR displays)"
-              "${indent}// NOTE: unconditional for now; proper HDR detection should disable on HDR output."
-              "${indent}otherConfiguration = QStringLiteral(""profile=high-quality`n"") + otherConfiguration;"
-              "${indent}otherConfiguration = QStringLiteral(""tone-mapping=bt.2390`n"") + otherConfiguration;"
-              "${indent}otherConfiguration = QStringLiteral(""gamut-mapping-mode=clip`n"") + otherConfiguration;"
-            ) -join "`r`n"
-          }, 1)
-        }
-        
-        if ($src -ne $orig) {
+        if (Test-Path $pc) {
+          $src = Get-Content $pc -Raw -Encoding UTF8
+
+          if ($src -notmatch 'WindowsSmtc\.h') {
+            $src = $src -replace '(?m)^#include\s+"PlayerComponent\.h"\s*$', "#include `"PlayerComponent.h`"`r`n#ifdef _WIN32`r`n#include `"WindowsSmtc.h`"`r`n#endif"
+          }
+
+          if ($src -notmatch 'CI PATCH: SMTC instance') {
+            $inject = @'
+#ifdef _WIN32
+// CI PATCH: SMTC instance (workflow-injected)
+static WindowsSmtc* g_smtc = nullptr;
+#endif
+'@
+            $src = $inject + "`r`n" + $src
+          }
+
+          if ($src -notmatch 'CI PATCH: init SMTC') {
+            $src = [regex]::Replace(
+              $src,
+              '(?s)(void\s+PlayerComponent::setWindow\s*\(\s*QQuickWindow\*\s*window\s*\)\s*\{.*?m_window\s*=\s*window;\s*)',
+              '$1' + "`r`n#ifdef _WIN32`r`n  // CI PATCH: init SMTC`r`n  if (!g_smtc) g_smtc = new WindowsSmtc(QCoreApplication::instance());`r`n  g_smtc->initForWindow(window, this);`r`n#endif`r`n",
+              1
+            )
+          }
+
+          if ($src -notmatch 'CI PATCH: SMTC signal wiring') {
+            $wire = @'
+#ifdef _WIN32
+  // CI PATCH: SMTC signal wiring
+  connect(this, &PlayerComponent::playing, this, []() { if (g_smtc) g_smtc->setPlaybackStatePlaying(); });
+  connect(this, &PlayerComponent::paused,  this, []() { if (g_smtc) g_smtc->setPlaybackStatePaused();  });
+  connect(this, &PlayerComponent::stopped, this, []() { if (g_smtc) g_smtc->setPlaybackStateStopped(); });
+  connect(this, &PlayerComponent::metadataChanged, this,
+          [](const QVariantMap& md, const QString&) { if (g_smtc) g_smtc->setMetadata(md); });
+#endif
+'@
+            # Append wiring right before the end of setWindow() (best-effort).
+            $src = [regex]::Replace(
+              $src,
+              '(?s)(void\s+PlayerComponent::setWindow\s*\(\s*QQuickWindow\*\s*window\s*\)\s*\{.*?\r?\n\})',
+              $args[0].Value -replace "\r?\n\}$", "`r`n$wire`r`n}",
+              1
+            )
+          }
+
           Set-Content -Path $pc -Value $src -Encoding UTF8
-          Write-Host "Patched ${pc}: prepended SDR tonemapping defaults into otherConfiguration"
-        } else {
-          Write-Host "HDR defaults patch already present (or nothing changed)"
         }
 
-        Write-Host "Source patched (includes + GL compat)."
+        Write-Host "Source patched (includes + GL compat + SMTC)."
 
     - name: Build Jellyfin Desktop
       shell: pwsh
@@ -271,7 +474,7 @@ jobs:
 
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
         if ($LASTEXITCODE -ne 0) { exit 1 }
-        
+
         Set-Location build
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
 
@@ -296,7 +499,7 @@ jobs:
         Write-Host "Detected Qt Bin Path: $qtBin"
         $qtRoot = Split-Path $qtBin -Parent
 
-        # Pre-copy core DLLs (kept from your workflow)
+        # Pre-copy core DLLs
         Write-Host "Forcing Qt DLL copy..."
         $qtDlls = @(
           "Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Network.dll",
@@ -319,7 +522,7 @@ jobs:
         $processExe = "$qtBin\QtWebEngineProcess.exe"
         if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
 
-        # Dependencies (libmpv, SDL2, OpenSSL, etc.)
+        # Dependencies
         Copy-Item -Force "$depInstall/bin/*.dll" $outDir
 
         # windeployqt
@@ -329,9 +532,9 @@ jobs:
         Write-Host "Running windeployqt..."
         & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
 
-        # DELETE qt.conf (requested)
-        if (Test-Path "$outDir\qt.conf")   { Remove-Item -Force "$outDir\qt.conf" }
-        if (Test-Path "$outDir\.qt.conf")  { Remove-Item -Force "$outDir\.qt.conf" }
+        # Remove qt.conf/.qt.conf
+        Remove-Item -Force -ErrorAction SilentlyContinue "$outDir\qt.conf"
+        Remove-Item -Force -ErrorAction SilentlyContinue "$outDir\.qt.conf"
 
         # VCRUNTIME manual copy
         $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
