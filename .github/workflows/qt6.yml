@@ -240,6 +240,11 @@ jobs:
         Set-Location build
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
 
+Here’s your workflow with only one change: after windeployqt finishes (and before zipping), it deletes qt.conf from output/ (and also .qt.conf just in case). This keeps the rest identical to what you pasted.​
+
+Replace your current Deploy Qt and Finalize step with this one (everything else in the workflow stays the same):
+
+text
     - name: Deploy Qt and Finalize
       shell: pwsh
       run: |
@@ -294,9 +299,9 @@ jobs:
         Write-Host "Running windeployqt..."
         & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
 
-        # Remove qt.conf/.qt.conf (avoid accidental bad path overrides)
-        Remove-Item -Force -ErrorAction SilentlyContinue "$outDir\qt.conf"
-        Remove-Item -Force -ErrorAction SilentlyContinue "$outDir\.qt.conf"
+        # DELETE qt.conf (requested)
+        if (Test-Path "$outDir\qt.conf")   { Remove-Item -Force "$outDir\qt.conf" }
+        if (Test-Path "$outDir\.qt.conf")  { Remove-Item -Force "$outDir\.qt.conf" }
 
         # VCRUNTIME manual copy
         $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
