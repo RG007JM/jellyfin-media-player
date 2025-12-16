@@ -22,7 +22,6 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
-    # 1. MPV FIRST (Verified Working)
     - name: Prepare Libmpv (Stable 20240922 - Fixed URL)
       shell: pwsh
       run: |
@@ -86,7 +85,6 @@ jobs:
         Copy-Item -Force "$root\lib\x64\SDL2main.lib" "dep-install\lib\"
         Copy-Item -Force "$root\lib\x64\SDL2.dll" "dep-install\bin\"
 
-    # CRITICAL FIX: Force Release Build for ECM and MpvQt
     - name: Prepare ECM and MpvQt
       shell: cmd
       run: |
@@ -160,11 +158,17 @@ jobs:
         "@
         Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
-        # --- PATCHES ---
+        # --- PATCH 1: CodecsComponent.cpp ---
         $f='src/player/CodecsComponent.cpp'
         $c=Get-Content $f -Raw
         $c='#include <windows.h>' + [Environment]::NewLine + $c
         Set-Content $f $c
+        
+        # --- PATCH 2: Remove Qt6::DBus from CMakeLists.txt (Fix for Windows Build) ---
+        $cm='src/CMakeLists.txt'
+        $txt=Get-Content $cm -Raw
+        $txt=$txt -replace 'Qt6::DBus', ''
+        Set-Content $cm $txt
 
         # --- CMAKE & NINJA ---
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
