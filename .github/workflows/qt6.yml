@@ -182,21 +182,21 @@ jobs:
             }
 
             $fn = @"
-static void forceCompatOpenGL()
-{
-    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
-    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
-
-    QSurfaceFormat fmt;
-    fmt.setRenderableType(QSurfaceFormat::OpenGL);
-    fmt.setVersion(3, 3);
-    fmt.setProfile(QSurfaceFormat::CompatibilityProfile);
-    fmt.setDepthBufferSize(24);
-    fmt.setStencilBufferSize(8);
-    QSurfaceFormat::setDefaultFormat(fmt);
-}
-
-"@
+            static void forceCompatOpenGL()
+            {
+                QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
+                QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+            
+                QSurfaceFormat fmt;
+                fmt.setRenderableType(QSurfaceFormat::OpenGL);
+                fmt.setVersion(3, 3);
+                fmt.setProfile(QSurfaceFormat::CompatibilityProfile);
+                fmt.setDepthBufferSize(24);
+                fmt.setStencilBufferSize(8);
+                QSurfaceFormat::setDefaultFormat(fmt);
+            }
+            
+            "@
 
             # Add helper before main()
             $rxMain = [regex]::new("(?m)^\s*int\s+main\s*\(")
@@ -238,7 +238,7 @@ static void forceCompatOpenGL()
           add_library(MPV::MPV UNKNOWN IMPORTED)
           set_target_properties(MPV::MPV PROPERTIES IMPORTED_LOCATION "$libMpv" INTERFACE_INCLUDE_DIRECTORIES "$incMpv")
         endif()
-"@
+        "@
         Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:Qt6_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
