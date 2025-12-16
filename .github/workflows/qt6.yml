@@ -12,7 +12,7 @@ jobs:
 
     # Force OpenGL renderer (needed for QQuickFramebufferObject video path).
     env:
-      #QSG_RHI_BACKEND: opengl
+      QSG_RHI_BACKEND: opengl
       QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
 
     steps:
@@ -132,26 +132,16 @@ jobs:
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
-    
-        # -----------------------------
+
         # 1) Patch src/CMakeLists.txt (remove linux-only components for Windows build)
-        # -----------------------------
         $cmakeFile = "src/CMakeLists.txt"
         $content = Get-Content $cmakeFile -Raw -Encoding UTF8
-    
-        $content = [System.Text.RegularExpressions.Regex]::Replace(
-          $content, '(?mi)^\s*add_subdirectory\(\s*taskbar\s*\)\s*$', ''
-        )
-        $content = [System.Text.RegularExpressions.Regex]::Replace(
-          $content, '(?mi)^\s*add_subdirectory\(\s*mpris\s*\)\s*$', ''
-        )
-    
+        $content = [System.Text.RegularExpressions.Regex]::Replace($content, '(?mi)^\s*add_subdirectory\(\s*taskbar\s*\)\s*$', '')
+        $content = [System.Text.RegularExpressions.Regex]::Replace($content, '(?mi)^\s*add_subdirectory\(\s*mpris\s*\)\s*$', '')
         $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
         Set-Content $cmakeFile $content -Encoding UTF8
-    
-        # -----------------------------
+
         # 2) Patch src/core/ComponentManager.cpp (remove includes/refs)
-        # -----------------------------
         $compMgr = "src/core/ComponentManager.cpp"
         $compContent = Get-Content $compMgr -Raw -Encoding UTF8
         $compContent = [System.Text.RegularExpressions.Regex]::Replace($compContent, '(?mi)^#include\s+.*MprisComponent\.h.*$', '')
@@ -159,43 +149,32 @@ jobs:
         $compContent = [System.Text.RegularExpressions.Regex]::Replace($compContent, '(?mi)^.*MprisComponent.*$', '')
         $compContent = [System.Text.RegularExpressions.Regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
         Set-Content $compMgr $compContent -Encoding UTF8
-    
-        # -----------------------------
+
         # 3) Patch src/ui/WindowManager.cpp (remove Taskbar usage)
-        # -----------------------------
         $winMgr = "src/ui/WindowManager.cpp"
         if (Test-Path $winMgr) {
           $winContent = Get-Content $winMgr -Raw -Encoding UTF8
           $winContent = [System.Text.RegularExpressions.Regex]::Replace($winContent, '(?mi)^.*TaskbarComponent.*$', '')
           Set-Content $winMgr $winContent -Encoding UTF8
         }
-    
-        # -----------------------------
+
         # 4) CodecsComponent.cpp: ensure windows.h is included (idempotent)
-        # -----------------------------
         $codecs = "src/player/CodecsComponent.cpp"
         $cc = Get-Content $codecs -Raw -Encoding UTF8
         if ($cc -notmatch '#include\s+<windows\.h>') {
           $cc = '#include <windows.h>' + [Environment]::NewLine + $cc
           Set-Content $codecs $cc -Encoding UTF8
         }
-    
-        # -----------------------------
+
         # 5) main.cpp: force Desktop OpenGL + CompatibilityProfile (idempotent)
-        # -----------------------------
         $main = "src/main.cpp"
         if (Test-Path $main) {
           $m = Get-Content $main -Raw -Encoding UTF8
-    
           if ($m -notmatch "forceCompatOpenGL") {
-    
-            if ($m -notmatch '#include\s+<QSurfaceFormat>') {
-              $m = "#include <QSurfaceFormat>`r`n" + $m
-            }
-            if ($m -notmatch '#include\s+<QCoreApplication>') {
-              $m = "#include <QCoreApplication>`r`n" + $m
-            }
-    
+
+            if ($m -notmatch '#include\s+<QSurfaceFormat>') { $m = "#include <QSurfaceFormat>`r`n" + $m }
+            if ($m -notmatch '#include\s+<QCoreApplication>') { $m = "#include <QCoreApplication>`r`n" + $m }
+
             $fn = @(
               'static void forceCompatOpenGL()'
               '{'
@@ -213,43 +192,35 @@ jobs:
               ''
               ''
             ) -join "`r`n"
-    
-            # Insert helper before first "int main("
+
             $rxMain = [System.Text.RegularExpressions.Regex]::new("(?m)^\s*int\s+main\s*\(")
             $m = $rxMain.Replace($m, $fn + "int main(", 1)
-    
-            # Insert call immediately after main() opening brace
+
             $rxBrace = [System.Text.RegularExpressions.Regex]::new('(?s)(int\s+main\s*\([^\)]*\)\s*\{)')
             $m = $rxBrace.Replace($m, '$1' + "`r`n    forceCompatOpenGL();", 1)
-    
+
             Set-Content $main $m -Encoding UTF8
           }
         }
-    
-        # -----------------------------
-        # 6) Windows SMTC injection
-        # -----------------------------
-        $hPath = "src/player/WindowsSmtc.h"
+
+        # 6) Windows SMTC injection (no QObject/Q_OBJECT => no moc dependency)
+        $hPath   = "src/player/WindowsSmtc.h"
         $cppPath = "src/player/WindowsSmtc.cpp"
-    
+
         $h = @(
           '#pragma once'
           '#ifdef _WIN32'
-          '#include <QObject>'
           '#include <QVariantMap>'
           '#include <QPointer>'
           ''
           'class PlayerComponent;'
           'class QQuickWindow;'
           ''
-          'class WindowsSmtc : public QObject'
+          'class WindowsSmtc'
           '{'
-          '    Q_OBJECT'
           'public:'
-          '    explicit WindowsSmtc(QObject* parent = nullptr);'
-          ''
+          '    WindowsSmtc() = default;'
           '    bool initForWindow(QQuickWindow* window, PlayerComponent* player);'
-          ''
           '    void setPlaybackStatePlaying();'
           '    void setPlaybackStatePaused();'
           '    void setPlaybackStateStopped();'
@@ -264,7 +235,7 @@ jobs:
           ''
         ) -join "`r`n"
         Set-Content -Path $hPath -Value $h -Encoding UTF8
-    
+
         $cpp = @(
           '#ifdef _WIN32'
           ''
@@ -272,7 +243,6 @@ jobs:
           ''
           '#include <QQuickWindow>'
           '#include <QVariantMap>'
-          '#include <QCoreApplication>'
           ''
           '#include <windows.h>'
           ''
@@ -294,21 +264,14 @@ jobs:
           '    return reinterpret_cast<HWND>(w ? w->winId() : 0);'
           '}'
           ''
-          'WindowsSmtc::WindowsSmtc(QObject* parent) : QObject(parent) {}'
-          ''
           'bool WindowsSmtc::initForWindow(QQuickWindow* window, PlayerComponent* player)'
           '{'
-          '    if (m_inited)'
-          '        return true;'
-          ''
+          '    if (m_inited) return true;'
           '    m_player = player;'
-          ''
           '    HWND hwnd = hwndFromQtWindow(window);'
-          '    if (!hwnd)'
-          '        return false;'
+          '    if (!hwnd) return false;'
           ''
           '    winrt::init_apartment(winrt::apartment_type::single_threaded);'
-          ''
           '    auto interop = winrt::get_activation_factory<SystemMediaTransportControls, ISystemMediaTransportControlsInterop>();'
           '    SystemMediaTransportControls smtc{ nullptr };'
           '    winrt::check_hresult(interop->GetForWindow(hwnd, winrt::guid_of<SystemMediaTransportControls>(), winrt::put_abi(smtc)));'
@@ -321,28 +284,19 @@ jobs:
           '    smtc.IsPreviousEnabled(true);'
           ''
           '    smtc.ButtonPressed([this](auto const&, SystemMediaTransportControlsButtonPressedEventArgs const& args) {'
-          '        if (!m_player)'
-          '            return;'
-          ''
-          '        switch (args.Button())'
-          '        {'
+          '        if (!m_player) return;'
+          '        switch (args.Button()) {'
           '        case SystemMediaTransportControlsButton::Play:'
-          '            QMetaObject::invokeMethod(m_player, "play", Qt::QueuedConnection);'
-          '            break;'
+          '            QMetaObject::invokeMethod(m_player, "play", Qt::QueuedConnection); break;'
           '        case SystemMediaTransportControlsButton::Pause:'
-          '            QMetaObject::invokeMethod(m_player, "pause", Qt::QueuedConnection);'
-          '            break;'
+          '            QMetaObject::invokeMethod(m_player, "pause", Qt::QueuedConnection); break;'
           '        case SystemMediaTransportControlsButton::Stop:'
-          '            QMetaObject::invokeMethod(m_player, "stop", Qt::QueuedConnection);'
-          '            break;'
+          '            QMetaObject::invokeMethod(m_player, "stop", Qt::QueuedConnection); break;'
           '        case SystemMediaTransportControlsButton::Next:'
-          '            QMetaObject::invokeMethod(m_player, "next", Qt::QueuedConnection);'
-          '            break;'
+          '            QMetaObject::invokeMethod(m_player, "next", Qt::QueuedConnection); break;'
           '        case SystemMediaTransportControlsButton::Previous:'
-          '            QMetaObject::invokeMethod(m_player, "previous", Qt::QueuedConnection);'
-          '            break;'
-          '        default:'
-          '            break;'
+          '            QMetaObject::invokeMethod(m_player, "previous", Qt::QueuedConnection); break;'
+          '        default: break;'
           '        }'
           '    });'
           ''
@@ -356,42 +310,23 @@ jobs:
           '    return reinterpret_cast<SystemMediaTransportControls*>(p);'
           '}'
           ''
-          'void WindowsSmtc::setPlaybackStatePlaying()'
-          '{'
-          '    if (!m_smtc) return;'
-          '    asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Playing);'
-          '}'
-          ''
-          'void WindowsSmtc::setPlaybackStatePaused()'
-          '{'
-          '    if (!m_smtc) return;'
-          '    asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Paused);'
-          '}'
-          ''
-          'void WindowsSmtc::setPlaybackStateStopped()'
-          '{'
-          '    if (!m_smtc) return;'
-          '    asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Stopped);'
-          '}'
+          'void WindowsSmtc::setPlaybackStatePlaying() { if (!m_smtc) return; asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Playing); }'
+          'void WindowsSmtc::setPlaybackStatePaused()  { if (!m_smtc) return; asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Paused);  }'
+          'void WindowsSmtc::setPlaybackStateStopped() { if (!m_smtc) return; asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Stopped); }'
           ''
           'void WindowsSmtc::setMetadata(const QVariantMap& md)'
           '{'
           '    if (!m_smtc) return;'
-          ''
           '    auto smtc = *asSmtc(m_smtc);'
           '    auto updater = smtc.DisplayUpdater();'
           '    updater.Type(MediaPlaybackType::Music);'
-          ''
           '    auto music = updater.MusicProperties();'
-          ''
           '    const auto title  = md.value("title").toString();'
           '    const auto artist = md.value("artist").toString();'
           '    const auto album  = md.value("album").toString();'
-          ''
           '    if (!title.isEmpty())  music.Title(title.toStdWString());'
           '    if (!artist.isEmpty()) music.Artist(artist.toStdWString());'
           '    if (!album.isEmpty())  music.AlbumTitle(album.toStdWString());'
-          ''
           '    updater.Update();'
           '}'
           ''
@@ -399,8 +334,8 @@ jobs:
           ''
         ) -join "`r`n"
         Set-Content -Path $cppPath -Value $cpp -Encoding UTF8
-    
-        # 6b) Patch src/CMakeLists.txt to compile & link it into jmp_core
+
+        # 6b) Patch src/CMakeLists.txt to compile & link it into jmp_core (plain signature)
         $t = Get-Content $cmakeFile -Raw -Encoding UTF8
         if ($t -notmatch "CI PATCH: Windows SMTC") {
           $append = @(
@@ -416,17 +351,21 @@ jobs:
           $t += $append
           Set-Content $cmakeFile $t -Encoding UTF8
         }
-    
-        # 6c) Patch PlayerComponent.cpp to init and feed SMTC
+
+        # 6c) Patch PlayerComponent.cpp (include + init + wiring)
         $pc = "src/player/PlayerComponent.cpp"
         if (Test-Path $pc) {
           $src = Get-Content $pc -Raw -Encoding UTF8
-    
+
+          $incBlock = "#ifdef _WIN32`r`n#include `"WindowsSmtc.h`"`r`n#endif`r`n"
           if ($src -notmatch 'WindowsSmtc\.h') {
-            $src = $src -replace '(?m)^#include\s+"PlayerComponent\.h"\s*$',
-              "#include `"PlayerComponent.h`"`r`n#ifdef _WIN32`r`n#include `"WindowsSmtc.h`"`r`n#endif"
+            if ($src -match '(?m)^#include\s+"PlayerComponent\.h"\s*$') {
+              $src = $src -replace '(?m)^#include\s+"PlayerComponent\.h"\s*$', ('$0' + "`r`n" + $incBlock.TrimEnd())
+            } else {
+              $src = $incBlock + $src
+            }
           }
-    
+
           if ($src -notmatch 'CI PATCH: SMTC instance') {
             $inject = @(
               '#ifdef _WIN32'
@@ -437,7 +376,7 @@ jobs:
             ) -join "`r`n"
             $src = $inject + "`r`n" + $src
           }
-    
+
           if ($src -notmatch 'CI PATCH: init SMTC') {
             $rxInit = [System.Text.RegularExpressions.Regex]::new(
               '(?s)(void\s+PlayerComponent::setWindow\s*\(\s*QQuickWindow\*\s*window\s*\)\s*\{.*?m_window\s*=\s*window;\s*)'
@@ -445,14 +384,14 @@ jobs:
             $insertInit = @(
               '#ifdef _WIN32'
               '  // CI PATCH: init SMTC'
-              '  if (!g_smtc) g_smtc = new WindowsSmtc(QCoreApplication::instance());'
+              '  if (!g_smtc) g_smtc = new WindowsSmtc();'
               '  g_smtc->initForWindow(window, this);'
               '#endif'
               ''
             ) -join "`r`n"
             $src = $rxInit.Replace($src, '$1' + "`r`n" + $insertInit, 1)
           }
-    
+
           if ($src -notmatch 'CI PATCH: SMTC signal wiring') {
             $wire = @(
               '#ifdef _WIN32'
@@ -465,7 +404,7 @@ jobs:
               '#endif'
               ''
             ) -join "`r`n"
-    
+
             $rxSetWindow = [System.Text.RegularExpressions.Regex]::new(
               '(?s)(void\s+PlayerComponent::setWindow\s*\(\s*QQuickWindow\*\s*window\s*\)\s*\{.*?\r?\n\})'
             )
@@ -475,12 +414,11 @@ jobs:
               return ($block -replace "\r?\n\}$", "`r`n$wire`r`n}")
             }, 1)
           }
-    
+
           Set-Content -Path $pc -Value $src -Encoding UTF8
         }
-    
-        Write-Host "Source patched (includes + GL compat + SMTC)."
 
+        Write-Host "Source patched (includes + GL compat + SMTC)."
 
     - name: Build Jellyfin Desktop
       shell: pwsh
