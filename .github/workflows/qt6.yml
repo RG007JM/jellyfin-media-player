@@ -213,6 +213,27 @@ jobs:
             Set-Content $main $m -Encoding UTF8
           }
         }
+        # 6) Remove qt.conf install rule (we deleted qt.conf everywhere)
+        $bundleCmake = "bundle/win/CMakeLists.txt"
+        if (Test-Path $bundleCmake) {
+          $b = Get-Content $bundleCmake -Raw
+        
+          # Remove any install(...) line that mentions qt.conf
+          $b2 = [regex]::Replace($b, '(?mi)^\s*install\s*\([^\)]*qt\.conf[^\)]*\)\s*$', '')
+        
+          # Also catch multi-line install(...) blocks that contain qt.conf
+          $b2 = [regex]::Replace($b2, '(?ms)^\s*install\s*\(\s*FILES\s+.*?qt\.conf.*?\)\s*$', '')
+        
+          if ($b2 -ne $b) {
+            Set-Content $bundleCmake $b2 -Encoding UTF8
+            Write-Host "Patched: removed qt.conf install rule from $bundleCmake"
+          } else {
+            Write-Host "No qt.conf install rule found in $bundleCmake"
+          }
+        } else {
+          Write-Host "No $bundleCmake (skipping qt.conf install-rule patch)"
+        }
+
 
         Write-Host "Source patched (includes + GL compat)."
 
