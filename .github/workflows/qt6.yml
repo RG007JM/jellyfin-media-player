@@ -12,7 +12,7 @@ jobs:
 
     # Force OpenGL renderer (needed for QQuickFramebufferObject video path).
     env:
-      QSG_RHI_BACKEND: opengl
+      #QSG_RHI_BACKEND: opengl
       QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
 
     steps:
@@ -212,227 +212,227 @@ jobs:
         $cppPath = "src/player/WindowsSmtc.cpp"
 
         $h = @'
-#pragma once
-#ifdef _WIN32
-#include <QObject>
-#include <QVariantMap>
-#include <QPointer>
-
-class PlayerComponent;
-class QQuickWindow;
-
-class WindowsSmtc : public QObject
-{
-    Q_OBJECT
-public:
-    explicit WindowsSmtc(QObject* parent = nullptr);
-
-    bool initForWindow(QQuickWindow* window, PlayerComponent* player);
-
-    void setPlaybackStatePlaying();
-    void setPlaybackStatePaused();
-    void setPlaybackStateStopped();
-    void setMetadata(const QVariantMap& metadata);
-
-private:
-    bool m_inited{false};
-    QPointer<PlayerComponent> m_player;
-    void* m_smtc{nullptr}; // winrt::Windows::Media::SystemMediaTransportControls*
-};
-#endif
-'@
-        Set-Content -Path $hPath -Value $h -Encoding UTF8
-
-        $cpp = @'
-#ifdef _WIN32
-
-#include "WindowsSmtc.h"
-
-#include <QQuickWindow>
-#include <QVariantMap>
-#include <QCoreApplication>
-
-#include <windows.h>
-
-#include <winrt/base.h>
-#include <winrt/Windows.Media.h>
-
-using namespace winrt;
-using namespace winrt::Windows::Media;
-
-class PlayerComponent;
-
-struct __declspec(uuid("dd151aac-98d0-4e70-a75f-6f03f39f2b4a")) ISystemMediaTransportControlsInterop : ::IUnknown
-{
-    virtual HRESULT __stdcall GetForWindow(HWND appWindow, REFIID riid, void** result) = 0;
-};
-
-static HWND hwndFromQtWindow(QQuickWindow* w)
-{
-    return reinterpret_cast<HWND>(w ? w->winId() : 0);
-}
-
-WindowsSmtc::WindowsSmtc(QObject* parent) : QObject(parent) {}
-
-bool WindowsSmtc::initForWindow(QQuickWindow* window, PlayerComponent* player)
-{
-    if (m_inited)
-        return true;
-
-    m_player = player;
-
-    HWND hwnd = hwndFromQtWindow(window);
-    if (!hwnd)
-        return false;
-
-    winrt::init_apartment(winrt::apartment_type::single_threaded);
-
-    auto interop = winrt::get_activation_factory<SystemMediaTransportControls, ISystemMediaTransportControlsInterop>();
-    SystemMediaTransportControls smtc{ nullptr };
-    winrt::check_hresult(interop->GetForWindow(hwnd, winrt::guid_of<SystemMediaTransportControls>(), winrt::put_abi(smtc)));
-
-    smtc.IsEnabled(true);
-    smtc.IsPlayEnabled(true);
-    smtc.IsPauseEnabled(true);
-    smtc.IsStopEnabled(true);
-    smtc.IsNextEnabled(true);
-    smtc.IsPreviousEnabled(true);
-
-    smtc.ButtonPressed([this](auto const&, SystemMediaTransportControlsButtonPressedEventArgs const& args) {
-        if (!m_player)
-            return;
-
-        switch (args.Button())
+        #pragma once
+        #ifdef _WIN32
+        #include <QObject>
+        #include <QVariantMap>
+        #include <QPointer>
+        
+        class PlayerComponent;
+        class QQuickWindow;
+        
+        class WindowsSmtc : public QObject
         {
-        case SystemMediaTransportControlsButton::Play:
-            QMetaObject::invokeMethod(m_player, "play", Qt::QueuedConnection);
-            break;
-        case SystemMediaTransportControlsButton::Pause:
-            QMetaObject::invokeMethod(m_player, "pause", Qt::QueuedConnection);
-            break;
-        case SystemMediaTransportControlsButton::Stop:
-            QMetaObject::invokeMethod(m_player, "stop", Qt::QueuedConnection);
-            break;
-        case SystemMediaTransportControlsButton::Next:
-            QMetaObject::invokeMethod(m_player, "next", Qt::QueuedConnection);
-            break;
-        case SystemMediaTransportControlsButton::Previous:
-            QMetaObject::invokeMethod(m_player, "previous", Qt::QueuedConnection);
-            break;
-        default:
-            break;
+            Q_OBJECT
+        public:
+            explicit WindowsSmtc(QObject* parent = nullptr);
+        
+            bool initForWindow(QQuickWindow* window, PlayerComponent* player);
+        
+            void setPlaybackStatePlaying();
+            void setPlaybackStatePaused();
+            void setPlaybackStateStopped();
+            void setMetadata(const QVariantMap& metadata);
+        
+        private:
+            bool m_inited{false};
+            QPointer<PlayerComponent> m_player;
+            void* m_smtc{nullptr}; // winrt::Windows::Media::SystemMediaTransportControls*
+        };
+        #endif
+        '@
+                Set-Content -Path $hPath -Value $h -Encoding UTF8
+        
+                $cpp = @'
+        #ifdef _WIN32
+        
+        #include "WindowsSmtc.h"
+        
+        #include <QQuickWindow>
+        #include <QVariantMap>
+        #include <QCoreApplication>
+        
+        #include <windows.h>
+        
+        #include <winrt/base.h>
+        #include <winrt/Windows.Media.h>
+        
+        using namespace winrt;
+        using namespace winrt::Windows::Media;
+        
+        class PlayerComponent;
+        
+        struct __declspec(uuid("dd151aac-98d0-4e70-a75f-6f03f39f2b4a")) ISystemMediaTransportControlsInterop : ::IUnknown
+        {
+            virtual HRESULT __stdcall GetForWindow(HWND appWindow, REFIID riid, void** result) = 0;
+        };
+        
+        static HWND hwndFromQtWindow(QQuickWindow* w)
+        {
+            return reinterpret_cast<HWND>(w ? w->winId() : 0);
         }
-    });
-
-    m_smtc = new SystemMediaTransportControls(smtc);
-    m_inited = true;
-    return true;
-}
-
-static SystemMediaTransportControls* asSmtc(void* p)
-{
-    return reinterpret_cast<SystemMediaTransportControls*>(p);
-}
-
-void WindowsSmtc::setPlaybackStatePlaying()
-{
-    if (!m_smtc) return;
-    asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Playing);
-}
-
-void WindowsSmtc::setPlaybackStatePaused()
-{
-    if (!m_smtc) return;
-    asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Paused);
-}
-
-void WindowsSmtc::setPlaybackStateStopped()
-{
-    if (!m_smtc) return;
-    asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Stopped);
-}
-
-void WindowsSmtc::setMetadata(const QVariantMap& md)
-{
-    if (!m_smtc) return;
-
-    auto smtc = *asSmtc(m_smtc);
-    auto updater = smtc.DisplayUpdater();
-    updater.Type(MediaPlaybackType::Music);
-
-    auto music = updater.MusicProperties();
-
-    const auto title  = md.value("title").toString();
-    const auto artist = md.value("artist").toString();
-    const auto album  = md.value("album").toString();
-
-    if (!title.isEmpty())  music.Title(title.toStdWString());
-    if (!artist.isEmpty()) music.Artist(artist.toStdWString());
-    if (!album.isEmpty())  music.AlbumTitle(album.toStdWString());
-
-    updater.Update();
-}
-
-#endif
-'@
-        Set-Content -Path $cppPath -Value $cpp -Encoding UTF8
-
-        # 6b) Patch src/CMakeLists.txt to compile & link it into jmp_core (correct for your CMake layout)
-        $t = Get-Content $cmakeFile -Raw -Encoding UTF8
-        if ($t -notmatch "CI PATCH: Windows SMTC") {
-          $append = @(
-            ''
-            '# CI PATCH: Windows SMTC'
-            'if(WIN32)'
-            '  target_sources(jmp_core PRIVATE player/WindowsSmtc.cpp)'
-            '  target_compile_features(jmp_core PRIVATE cxx_std_17)'
-            '  target_link_libraries(jmp_core PRIVATE runtimeobject)'
-            'endif()'
-            ''
-          ) -join "`r`n"
-          $t += $append
-          Set-Content $cmakeFile $t -Encoding UTF8
+        
+        WindowsSmtc::WindowsSmtc(QObject* parent) : QObject(parent) {}
+        
+        bool WindowsSmtc::initForWindow(QQuickWindow* window, PlayerComponent* player)
+        {
+            if (m_inited)
+                return true;
+        
+            m_player = player;
+        
+            HWND hwnd = hwndFromQtWindow(window);
+            if (!hwnd)
+                return false;
+        
+            winrt::init_apartment(winrt::apartment_type::single_threaded);
+        
+            auto interop = winrt::get_activation_factory<SystemMediaTransportControls, ISystemMediaTransportControlsInterop>();
+            SystemMediaTransportControls smtc{ nullptr };
+            winrt::check_hresult(interop->GetForWindow(hwnd, winrt::guid_of<SystemMediaTransportControls>(), winrt::put_abi(smtc)));
+        
+            smtc.IsEnabled(true);
+            smtc.IsPlayEnabled(true);
+            smtc.IsPauseEnabled(true);
+            smtc.IsStopEnabled(true);
+            smtc.IsNextEnabled(true);
+            smtc.IsPreviousEnabled(true);
+        
+            smtc.ButtonPressed([this](auto const&, SystemMediaTransportControlsButtonPressedEventArgs const& args) {
+                if (!m_player)
+                    return;
+        
+                switch (args.Button())
+                {
+                case SystemMediaTransportControlsButton::Play:
+                    QMetaObject::invokeMethod(m_player, "play", Qt::QueuedConnection);
+                    break;
+                case SystemMediaTransportControlsButton::Pause:
+                    QMetaObject::invokeMethod(m_player, "pause", Qt::QueuedConnection);
+                    break;
+                case SystemMediaTransportControlsButton::Stop:
+                    QMetaObject::invokeMethod(m_player, "stop", Qt::QueuedConnection);
+                    break;
+                case SystemMediaTransportControlsButton::Next:
+                    QMetaObject::invokeMethod(m_player, "next", Qt::QueuedConnection);
+                    break;
+                case SystemMediaTransportControlsButton::Previous:
+                    QMetaObject::invokeMethod(m_player, "previous", Qt::QueuedConnection);
+                    break;
+                default:
+                    break;
+                }
+            });
+        
+            m_smtc = new SystemMediaTransportControls(smtc);
+            m_inited = true;
+            return true;
         }
-
-        # 6c) Patch PlayerComponent.cpp to init and feed SMTC
-        $pc = "src/player/PlayerComponent.cpp"
-        if (Test-Path $pc) {
-          $src = Get-Content $pc -Raw -Encoding UTF8
-
-          if ($src -notmatch 'WindowsSmtc\.h') {
-            $src = $src -replace '(?m)^#include\s+"PlayerComponent\.h"\s*$', "#include `"PlayerComponent.h`"`r`n#ifdef _WIN32`r`n#include `"WindowsSmtc.h`"`r`n#endif"
-          }
-
-          if ($src -notmatch 'CI PATCH: SMTC instance') {
-            $inject = @'
-#ifdef _WIN32
-// CI PATCH: SMTC instance (workflow-injected)
-static WindowsSmtc* g_smtc = nullptr;
-#endif
-'@
-            $src = $inject + "`r`n" + $src
-          }
-
-          if ($src -notmatch 'CI PATCH: init SMTC') {
-            $src = [regex]::Replace(
-              $src,
-              '(?s)(void\s+PlayerComponent::setWindow\s*\(\s*QQuickWindow\*\s*window\s*\)\s*\{.*?m_window\s*=\s*window;\s*)',
-              '$1' + "`r`n#ifdef _WIN32`r`n  // CI PATCH: init SMTC`r`n  if (!g_smtc) g_smtc = new WindowsSmtc(QCoreApplication::instance());`r`n  g_smtc->initForWindow(window, this);`r`n#endif`r`n",
-              1
-            )
-          }
-
-          if ($src -notmatch 'CI PATCH: SMTC signal wiring') {
-            $wire = @'
-#ifdef _WIN32
-  // CI PATCH: SMTC signal wiring
-  connect(this, &PlayerComponent::playing, this, []() { if (g_smtc) g_smtc->setPlaybackStatePlaying(); });
-  connect(this, &PlayerComponent::paused,  this, []() { if (g_smtc) g_smtc->setPlaybackStatePaused();  });
-  connect(this, &PlayerComponent::stopped, this, []() { if (g_smtc) g_smtc->setPlaybackStateStopped(); });
-  connect(this, &PlayerComponent::metadataChanged, this,
-          [](const QVariantMap& md, const QString&) { if (g_smtc) g_smtc->setMetadata(md); });
-#endif
-'@
+        
+        static SystemMediaTransportControls* asSmtc(void* p)
+        {
+            return reinterpret_cast<SystemMediaTransportControls*>(p);
+        }
+        
+        void WindowsSmtc::setPlaybackStatePlaying()
+        {
+            if (!m_smtc) return;
+            asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Playing);
+        }
+        
+        void WindowsSmtc::setPlaybackStatePaused()
+        {
+            if (!m_smtc) return;
+            asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Paused);
+        }
+        
+        void WindowsSmtc::setPlaybackStateStopped()
+        {
+            if (!m_smtc) return;
+            asSmtc(m_smtc)->PlaybackStatus(MediaPlaybackStatus::Stopped);
+        }
+        
+        void WindowsSmtc::setMetadata(const QVariantMap& md)
+        {
+            if (!m_smtc) return;
+        
+            auto smtc = *asSmtc(m_smtc);
+            auto updater = smtc.DisplayUpdater();
+            updater.Type(MediaPlaybackType::Music);
+        
+            auto music = updater.MusicProperties();
+        
+            const auto title  = md.value("title").toString();
+            const auto artist = md.value("artist").toString();
+            const auto album  = md.value("album").toString();
+        
+            if (!title.isEmpty())  music.Title(title.toStdWString());
+            if (!artist.isEmpty()) music.Artist(artist.toStdWString());
+            if (!album.isEmpty())  music.AlbumTitle(album.toStdWString());
+        
+            updater.Update();
+        }
+        
+        #endif
+        '@
+                Set-Content -Path $cppPath -Value $cpp -Encoding UTF8
+        
+                # 6b) Patch src/CMakeLists.txt to compile & link it into jmp_core (correct for your CMake layout)
+                $t = Get-Content $cmakeFile -Raw -Encoding UTF8
+                if ($t -notmatch "CI PATCH: Windows SMTC") {
+                  $append = @(
+                    ''
+                    '# CI PATCH: Windows SMTC'
+                    'if(WIN32)'
+                    '  target_sources(jmp_core PRIVATE player/WindowsSmtc.cpp)'
+                    '  target_compile_features(jmp_core PRIVATE cxx_std_17)'
+                    '  target_link_libraries(jmp_core PRIVATE runtimeobject)'
+                    'endif()'
+                    ''
+                  ) -join "`r`n"
+                  $t += $append
+                  Set-Content $cmakeFile $t -Encoding UTF8
+                }
+        
+                # 6c) Patch PlayerComponent.cpp to init and feed SMTC
+                $pc = "src/player/PlayerComponent.cpp"
+                if (Test-Path $pc) {
+                  $src = Get-Content $pc -Raw -Encoding UTF8
+        
+                  if ($src -notmatch 'WindowsSmtc\.h') {
+                    $src = $src -replace '(?m)^#include\s+"PlayerComponent\.h"\s*$', "#include `"PlayerComponent.h`"`r`n#ifdef _WIN32`r`n#include `"WindowsSmtc.h`"`r`n#endif"
+                  }
+        
+                  if ($src -notmatch 'CI PATCH: SMTC instance') {
+                    $inject = @'
+        #ifdef _WIN32
+        // CI PATCH: SMTC instance (workflow-injected)
+        static WindowsSmtc* g_smtc = nullptr;
+        #endif
+        '@
+                    $src = $inject + "`r`n" + $src
+                  }
+        
+                  if ($src -notmatch 'CI PATCH: init SMTC') {
+                    $src = [regex]::Replace(
+                      $src,
+                      '(?s)(void\s+PlayerComponent::setWindow\s*\(\s*QQuickWindow\*\s*window\s*\)\s*\{.*?m_window\s*=\s*window;\s*)',
+                      '$1' + "`r`n#ifdef _WIN32`r`n  // CI PATCH: init SMTC`r`n  if (!g_smtc) g_smtc = new WindowsSmtc(QCoreApplication::instance());`r`n  g_smtc->initForWindow(window, this);`r`n#endif`r`n",
+                      1
+                    )
+                  }
+        
+                  if ($src -notmatch 'CI PATCH: SMTC signal wiring') {
+                    $wire = @'
+        #ifdef _WIN32
+          // CI PATCH: SMTC signal wiring
+          connect(this, &PlayerComponent::playing, this, []() { if (g_smtc) g_smtc->setPlaybackStatePlaying(); });
+          connect(this, &PlayerComponent::paused,  this, []() { if (g_smtc) g_smtc->setPlaybackStatePaused();  });
+          connect(this, &PlayerComponent::stopped, this, []() { if (g_smtc) g_smtc->setPlaybackStateStopped(); });
+          connect(this, &PlayerComponent::metadataChanged, this,
+                  [](const QVariantMap& md, const QString&) { if (g_smtc) g_smtc->setMetadata(md); });
+        #endif
+        '@
             # Append wiring right before the end of setWindow() (best-effort).
             $src = [regex]::Replace(
               $src,
