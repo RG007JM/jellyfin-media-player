@@ -433,12 +433,18 @@ jobs:
                   [](const QVariantMap& md, const QString&) { if (g_smtc) g_smtc->setMetadata(md); });
         #endif
         '@
-            # Append wiring right before the end of setWindow() (best-effort).
-            $src = [regex]::Replace(
-              $src,
-              '(?s)(void\s+PlayerComponent::setWindow\s*\(\s*QQuickWindow\*\s*window\s*\)\s*\{.*?\r?\n\})',
-              $args[0].Value -replace "\r?\n\}$", "`r`n$wire`r`n}",
-              1
+            # Append wiring right before the end of setWindow() (best-effort) — SAFE overload
+            $rx = [System.Text.RegularExpressions.Regex]::new(
+              '(?s)(void\s+PlayerComponent::setWindow\s*\(\s*QQuickWindow\*\s*window\s*\)\s*\{.*?\r?\n\})'
+            )
+            
+            $src = $rx.Replace($src, {
+              param($m)
+              # take the matched setWindow() body and inject before the final "}"
+              $block = $m.Groups[1].Value
+              return ($block -replace "\r?\n\}$", "`r`n$wire`r`n}")
+            }, 1)
+
             )
           }
 
