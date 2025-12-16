@@ -8,7 +8,7 @@ include_directories(
 )
 
 set(CMAKE_AUTOMOC ON)
-set(Qt6Core_RCC_EXECUTABLE Qt6::rcc)
+get_target_property(Qt6Core_RCC_EXECUTABLE Qt6::rcc IMPORTED_LOCATION)
 add_definitions(-DPREFIX="${CMAKE_INSTALL_PREFIX}")
 
 add_subdirectory(shared)
@@ -53,30 +53,25 @@ endforeach(sfile in ${ALL_SRCS})
 # Build core sources as static library for reuse by tests
 add_library(jmp_core STATIC ${ALL_SRCS})
 
-file(GLOB_RECURSE RESOURCE_FILES ${CMAKE_SOURCE_DIR}/resources/*)
-file(GLOB_RECURSE NATIVE_FILES ${CMAKE_SOURCE_DIR}/native/*)
+file(GLOB_RECURSE RESOURCE_FILES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/resources/*)
+file(GLOB_RECURSE NATIVE_FILES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/native/*)
 
-# generate resources.qrc from directory tree listings
-add_custom_command(OUTPUT resources.qrc
-  COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/build-qt-resources.py
-          ${CMAKE_CURRENT_BINARY_DIR}/resources.qrc
-          /=${CMAKE_SOURCE_DIR}/resources/
-          ui/webview.qml=${CMAKE_SOURCE_DIR}/src/ui/webview.qml
-          /web-client/extension=${CMAKE_SOURCE_DIR}/native/
-  COMMENT "Creating resources.qrc"
-  DEPENDS ${CMAKE_SOURCE_DIR}/scripts/build-qt-resources.py
-    ${RESOURCE_FILES}
-    ${CMAKE_SOURCE_DIR}/src/ui/webview.qml
-    ${NATIVE_FILES}
+# Generate resources - runs rcc, only writes output if changed
+add_custom_target(generate_resources ALL
+  COMMAND ${CMAKE_COMMAND}
+          -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/qrc_resources.cpp
+          -DRCC=${Qt6Core_RCC_EXECUTABLE}
+          -DRESOURCES_DIR=${CMAKE_SOURCE_DIR}/resources
+          -DNATIVE_DIR=${CMAKE_SOURCE_DIR}/native
+          -DWEBVIEW_QML=${CMAKE_SOURCE_DIR}/src/ui/webview.qml
+          -P ${CMAKE_SOURCE_DIR}/CMakeModules/GenerateQtResources.cmake
+  BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/qrc_resources.cpp
+  VERBATIM
+  COMMENT "Generating resources"
 )
-set_source_files_properties(resources.qrc PROPERTIES GENERATED TRUE)
-add_custom_command(OUTPUT qrc_resources.cpp
-  COMMAND ${Qt6Core_RCC_EXECUTABLE} -name resources -o qrc_resources.cpp resources.qrc
-  DEPENDS resources.qrc ${CMAKE_SOURCE_DIR}/src/ui/webview.qml ${RESOURCE_FILES} ${NATIVE_FILES}
-)
-set_source_files_properties(qrc_resources.cpp PROPERTIES GENERATED TRUE)
+set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/qrc_resources.cpp PROPERTIES GENERATED TRUE)
 
-list(APPEND RESOURCE_FILES qrc_resources.cpp)
+list(APPEND RESOURCE_FILES ${CMAKE_CURRENT_BINARY_DIR}/qrc_resources.cpp)
 
 set(MACOSX_BUNDLE_ICON_FILE jellyfin.icns)
 set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${VERSION_STRING})
@@ -128,6 +123,7 @@ endif()
 
 get_property(BUNDLED_FILES GLOBAL PROPERTY CONFIG_BUNDLED_FILES)
 add_executable(${MAIN_TARGET} WIN32 MACOSX_BUNDLE ${MAIN_SRCS} ${BUNDLED_FILES} ${RESOURCE_FILES} ${XCODE_RESOURCES})
+add_dependencies(${MAIN_TARGET} generate_resources)
 std_target_properties(${MAIN_TARGET})
 set_target_properties(${MAIN_TARGET} PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/bundle/osx/Info.plist.in
@@ -179,7 +175,6 @@ target_link_libraries(jmp_core
   ${EXTRA_LIBS}
   ${X11_LIBRARIES}
   ${X11_Xrandr_LIB}
-  ${ICU_LIBRARIES}
   ${CMAKE_THREAD_LIBS_INIT}
   ${RPI_LIBS}
   ${MINIZIP_LIBS}
