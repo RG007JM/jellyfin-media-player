@@ -10,9 +10,6 @@ jobs:
   build-win64:
     runs-on: windows-latest
     
-    # 1. REMOVE ALL GRAPHICS OVERRIDES
-    # We strip out QSG_RHI_BACKEND and QT_OPENGL. 
-    # This allows Qt 6 to default to Direct3D 11, which is the native, stable path for WebEngine on Windows.
     env:
       QTWEBENGINE_CHROMIUM_FLAGS: "--no-sandbox"
 
@@ -129,7 +126,7 @@ jobs:
             Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (Convert MpvVideoItem to Dummy)
+    - name: Patch Source Code (Include Fix + Dummy Video)
       shell: pwsh
       run: |
         # 1. Patch src/CMakeLists.txt
@@ -140,16 +137,32 @@ jobs:
         $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
         Set-Content $cmakeFile $content -Encoding UTF8
         
-        # 2. Patch CodecsComponent.cpp
+        # 2. Patch src/core/ComponentManager.cpp - FIXING THE INCLUDE ERROR
+        $compMgr = "src/core/ComponentManager.cpp"
+        $compContent = Get-Content $compMgr -Raw
+        # Remove the includes
+        $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*MprisComponent\.h.*$', '')
+        $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*TaskbarComponent\.h.*$', '')
+        # Remove the registrations
+        $compContent = [regex]::Replace($compContent, '(?mi)^.*MprisComponent.*$', '')
+        $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
+        Set-Content $compMgr $compContent -Encoding UTF8
+        
+        # 3. Patch src/ui/WindowManager.cpp
+        $winMgr = "src/ui/WindowManager.cpp"
+        if (Test-Path $winMgr) {
+            $winContent = Get-Content $winMgr -Raw
+            $winContent = [regex]::Replace($winContent, '(?mi)^.*TaskbarComponent.*$', '')
+            Set-Content $winMgr $winContent -Encoding UTF8
+        }
+        
+        # 4. CodecsComponent.cpp patch
         $codecs = "src/player/CodecsComponent.cpp"
         $c = Get-Content $codecs -Raw
         $c = '#include <windows.h>' + [Environment]::NewLine + $c
         Set-Content $codecs $c -Encoding UTF8
         
-        # 3. CRITICAL: Neutering MpvVideoItem to support D3D11
-        # We change inheritance from QQuickFramebufferObject -> QQuickItem
-        # This removes the OpenGL requirement, allowing the UI to load in D3D11 mode.
-        
+        # 5. MpvVideoItem Dummy Patch (For D3D11 Compatibility)
         $header = "src/player/MpvVideoItem.h"
         $htxt = Get-Content $header -Raw
         $htxt = $htxt.Replace("QQuickFramebufferObject", "QQuickItem")
@@ -159,11 +172,10 @@ jobs:
         
         $cpp = "src/player/MpvVideoItem.cpp"
         $ctxt = Get-Content $cpp -Raw
-        # Disable createRenderer implementation
         $ctxt = $ctxt.Replace("MpvVideoItem::Renderer *MpvVideoItem::createRenderer()", "void *MpvVideoItem__createRenderer_disabled()")
         Set-Content $cpp $ctxt
-        
-        Write-Host "MpvVideoItem successfully patched to dummy QQuickItem."
+
+        Write-Host "Source patched: Mpris/Taskbar includes removed + MpvVideoItem dummy applied."
 
     - name: Build Jellyfin Desktop
       shell: pwsh
