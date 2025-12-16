@@ -171,48 +171,7 @@ jobs:
           Set-Content $codecs $c -Encoding UTF8
         }
 
-        # 5) main.cpp: force Desktop OpenGL + CompatibilityProfile (idempotent, no here-strings)
-        $main = "src/main.cpp"
-        if (Test-Path $main) {
-          $m = Get-Content $main -Raw -Encoding UTF8
 
-          if ($m -notmatch "forceCompatOpenGL") {
-
-            if ($m -notmatch '#include\s+<QSurfaceFormat>') {
-              $m = "#include <QSurfaceFormat>`r`n" + $m
-            }
-            if ($m -notmatch '#include\s+<QCoreApplication>') {
-              $m = "#include <QCoreApplication>`r`n" + $m
-            }
-
-            $fn = @(
-              'static void forceCompatOpenGL()'
-              '{'
-              '    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);'
-              '    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);'
-              ''
-              '    QSurfaceFormat fmt;'
-              '    fmt.setRenderableType(QSurfaceFormat::OpenGL);'
-              '    fmt.setVersion(3, 3);'
-              '    fmt.setProfile(QSurfaceFormat::CompatibilityProfile);'
-              '    fmt.setDepthBufferSize(24);'
-              '    fmt.setStencilBufferSize(8);'
-              '    QSurfaceFormat::setDefaultFormat(fmt);'
-              '}'
-              ''
-              ''
-            ) -join "`r`n"
-
-            # Insert helper before first "int main("
-            $rxMain = [regex]::new("(?m)^\s*int\s+main\s*\(")
-            $m = $rxMain.Replace($m, $fn + "int main(", 1)
-
-            # Insert call immediately after main() opening brace
-            $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{)', '$1' + "`r`n    forceCompatOpenGL();", 1)
-
-            Set-Content $main $m -Encoding UTF8
-          }
-        }
         # 6) Remove qt.conf install + generation (required if qt.conf is deleted everywhere)
         $filesToPatch = @(
           "CMakeModules/CPackConfiguration.cmake",
@@ -251,7 +210,6 @@ jobs:
 
 
         # 8) HDR/SDR: prepend default mpv options into "otherConfiguration" string
-        # This avoids referencing mmpv directly (fixes C2065).
         $pc = "src/player/PlayerComponent.cpp"
         if (-not (Test-Path $pc)) { throw "Missing $pc" }
         
@@ -260,8 +218,7 @@ jobs:
         
         if ($src -notmatch "CI PATCH: SDR tonemap defaults") {
         
-          # Find the line: QString otherConfiguration = SettingsComponentGet.value(...).toString();
-          $pattern = '(?m)^(?<indent>\s*)QString\s+otherConfiguration\s*=\s*SettingsComponentGet\.value\([^\)]*\)\.toString\(\)\s*;\s*$'
+          $pattern = '(?m)^(?<indent>\s*)QString\s+otherConfiguration\s*=\s*.*value\([^\)]*\).*toString\(\)\s*;\s*$'
           if ($src -notmatch $pattern) { throw "Could not find otherConfiguration assignment to patch" }
         
           $src = [regex]::Replace($src, $pattern, {
@@ -270,21 +227,20 @@ jobs:
             @(
               $m.Value
               "${indent}// CI PATCH: SDR tonemap defaults (fix washed-out HDR on SDR displays)"
-              "${indent}// NOTE: This is unconditional for now; proper HDR detection should disable on HDR output."
-              "${indent}otherConfiguration = QStringLiteral(""profile=high-quality`tone-mapping=bt.2390`t`ngamut-mapping-mode=clip`t`n"") + otherConfiguration;"
+              "${indent}// NOTE: unconditional for now; proper HDR detection should disable on HDR output."
+              "${indent}otherConfiguration = QStringLiteral(""profile=high-quality`n"") + otherConfiguration;"
+              "${indent}otherConfiguration = QStringLiteral(""tone-mapping=bt.2390`n"") + otherConfiguration;"
+              "${indent}otherConfiguration = QStringLiteral(""gamut-mapping-mode=clip`n"") + otherConfiguration;"
             ) -join "`r`n"
           }, 1)
         }
         
         if ($src -ne $orig) {
           Set-Content -Path $pc -Value $src -Encoding UTF8
-          Write-Host "Patched $pc: prepended SDR tonemapping defaults into otherConfiguration"
+          Write-Host "Patched ${pc}: prepended SDR tonemapping defaults into otherConfiguration"
         } else {
           Write-Host "HDR defaults patch already present (or nothing changed)"
         }
-
-
-
 
         Write-Host "Source patched (includes + GL compat)."
 
