@@ -115,25 +115,13 @@ jobs:
           ninja -C build install
           cd ..
 
-      - name: Verify MpvQtConfig.cmake exists
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $depInstall = Join-Path (Get-Location).Path "dep-install"
-          $hits = Get-ChildItem -Recurse -Path (Join-Path $depInstall "lib\cmake") -Filter "MpvQtConfig.cmake" -ErrorAction SilentlyContinue
-          if (-not $hits) {
-            Write-Host "Contents of dep-install\lib\cmake:"
-            Get-ChildItem -Recurse -Path (Join-Path $depInstall "lib\cmake") -ErrorAction SilentlyContinue | Select-Object FullName
-            throw "MpvQtConfig.cmake was not installed. mpvqt build/install did not produce a CMake package."
-          }
-          $hits | Select-Object FullName
-
       - name: Download Stage VC Redist and OpenSSL
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path bundle\win | Out-Null
           Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile bundle\win\vcredist_x64.exe
+
           Invoke-WebRequest -Uri "https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-3.6.0.zip" -OutFile openssl.zip
           Expand-Archive openssl.zip -DestinationPath openssl-temp -Force
           $binPath = (Get-ChildItem -Path openssl-temp -Recurse -Filter libssl-3-x64.dll | Select-Object -First 1).DirectoryName
@@ -158,6 +146,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
+          # 1) src/CMakeLists.txt: strip mpris/taskbar and Qt6::DBus/Qt6::WinExtras from CI build
           $cmakeFile = "src/CMakeLists.txt"
           $content = Get-Content $cmakeFile -Raw -Encoding UTF8
           $content = [regex]::Replace($content, '(?mi)^\s*add_subdirectory\(\s*mpris\s*\)\s*$', '')
@@ -165,6 +154,7 @@ jobs:
           $content = $content.Replace("Qt6::DBus", "").Replace("Qt6::WinExtras", "")
           Set-Content $cmakeFile $content -Encoding UTF8
 
+          # 2) ComponentManager.cpp: strip component references removed above
           $compMgr = "src/core/ComponentManager.cpp"
           if (Test-Path $compMgr) {
             $c = Get-Content $compMgr -Raw -Encoding UTF8
@@ -177,6 +167,7 @@ jobs:
             Set-Content $compMgr $c -Encoding UTF8
           }
 
+          # 3) WindowManager.cpp: strip taskbar references (if present)
           $winMgr = "src/ui/WindowManager.cpp"
           if (Test-Path $winMgr) {
             $w = Get-Content $winMgr -Raw -Encoding UTF8
@@ -184,6 +175,7 @@ jobs:
             Set-Content $winMgr $w -Encoding UTF8
           }
 
+          # 4) Ensure windows.h include in CodecsComponent.cpp
           $codecs = "src/player/CodecsComponent.cpp"
           if (Test-Path $codecs) {
             $cc = Get-Content $codecs -Raw -Encoding UTF8
@@ -193,6 +185,7 @@ jobs:
             }
           }
 
+          # 5) Patch src/main.cpp: remove hard-force OpenGL renderer selection
           $main = "src/main.cpp"
           if (Test-Path $main) {
             $m = Get-Content $main -Raw -Encoding UTF8
@@ -201,6 +194,7 @@ jobs:
             Set-Content -Path $main -Value $m -Encoding UTF8
           }
 
+          # 6) Disable qt.conf install generation rules
           $filesToPatch = @("CMakeModules/CPackConfiguration.cmake","CMakeModules/QtConfiguration.cmake")
           foreach ($f in $filesToPatch) {
             if (-not (Test-Path $f)) { continue }
@@ -210,7 +204,7 @@ jobs:
             Set-Content -Path $f -Value $t -Encoding UTF8
           }
 
-      - name: Build Jellyfin Desktop
+      - name: Build Jellyfin Desktop (workflow-only FindMpvQt.cmake)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -221,6 +215,7 @@ jobs:
           $incMpv = Join-Path $depInstall "include"
           $installPrefix = Join-Path $root "output"
 
+          # --- Override FindMPV.cmake to use our staged mpv ---
           $cmakeMod = "CMakeModules/FindMPV.cmake"
           $overrideContent = @"
           set(MPV_FOUND TRUE)
@@ -228,6 +223,7 @@ jobs:
           set(MPV_LIBRARY "$libMpv")
           set(MPV_LIBRARIES "$libMpv")
           set(MPV_INCLUDE_DIRS "$incMpv")
+          
           if(NOT TARGET MPV::MPV)
             add_library(MPV::MPV UNKNOWN IMPORTED)
             set_target_properties(MPV::MPV PROPERTIES
@@ -238,16 +234,44 @@ jobs:
           "@
           Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
+          # --- NEW: Provide FindMpvQt.cmake so we do not need MpvQtConfig.cmake ---
+          $findMpvQt = "CMakeModules/FindMpvQt.cmake"
+
+          $libCandidates = @(
+            Join-Path $depInstall "lib\MpvQt.lib",
+            Join-Path $depInstall "lib\mpvqt.lib"
+          )
+          $libFound = $libCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $libFound) {
+            $libFound = Get-ChildItem -Path (Join-Path $depInstall "lib") -Filter "*mpvqt*.lib" -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object FullName
+          }
+          if (-not $libFound) {
+            Write-Host "dep-install\lib contents:"
+            Get-ChildItem -Path (Join-Path $depInstall "lib") -ErrorAction SilentlyContinue | Select-Object Name
+            throw "Could not find mpvqt import library in dep-install\lib"
+          }
+
+          @"
+          # Autogenerated by CI workflow
+          set(MpvQt_FOUND TRUE)
+          set(MpvQt_INCLUDE_DIR "$incMpv")
+          set(MpvQt_INCLUDE_DIRS "$incMpv")
+          set(MpvQt_LIBRARY "$libFound")
+          set(MpvQt_LIBRARIES "$libFound")
+          
+          if(NOT TARGET MpvQt::MpvQt)
+            add_library(MpvQt::MpvQt UNKNOWN IMPORTED)
+            set_target_properties(MpvQt::MpvQt PROPERTIES
+              IMPORTED_LOCATION "$libFound"
+              INTERFACE_INCLUDE_DIRECTORIES "$incMpv"
+            )
+          endif()
+          "@ | Set-Content -Path $findMpvQt -Encoding UTF8
+
           $qtRootDir = $env:QT_ROOT_DIR
           if (-not $qtRootDir) { throw "QT_ROOT_DIR is not set (install-qt-action env missing)" }
 
-          # Find where MpvQtConfig.cmake actually landed
-          $mpvQtConfig = Get-ChildItem -Recurse -Path (Join-Path $depInstall "lib\cmake") -Filter "MpvQtConfig.cmake" | Select-Object -First 1
-          if (-not $mpvQtConfig) { throw "MpvQtConfig.cmake missing even after verification step." }
-          $mpvQtDir = Split-Path $mpvQtConfig.FullName -Parent
-          Write-Host "Using MpvQt_DIR=$mpvQtDir"
-
-          cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$qtRootDir`" -DMpvQt_DIR=`"$mpvQtDir`" ."
+          cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$qtRootDir`" ."
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
           Push-Location build
