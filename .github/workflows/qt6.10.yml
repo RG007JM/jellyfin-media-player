@@ -83,14 +83,13 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip" -OutFile sdl2.zip
           Expand-Archive sdl2.zip -DestinationPath sdl2-temp -Force
           $root = (Get-ChildItem sdl2-temp | Select-Object -First 1).FullName
-
           Copy-Item -Recurse -Force "$root\*" dep-install\
           Copy-Item -Force "$root\lib\x64\SDL2.lib" dep-install\
           Copy-Item -Force "$root\lib\x64\SDL2main.lib" dep-install\
           Copy-Item -Force "$root\lib\x64\SDL2.dll" dep-install\
           Remove-Item -Recurse -Force sdl2-temp, sdl2.zip
 
-      - name: Prepare ECM and MpvQt
+      - name: Prepare ECM and MpvQt (install into dep-install)
         shell: cmd
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
@@ -108,30 +107,38 @@ jobs:
           echo.> src\dummy.cpp
           echo MpvController::MpvController() = default;>> src\dummy.cpp
 
-          REM FIX: configure mpvqt with proper prefix paths (Qt + ECM are in INSTALLDIR + QT_ROOT_DIR)
           cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=%INSTALLDIR% ^
-            -DCMAKE_PREFIX_PATH=%INSTALLDIR%;%QT_ROOT_DIR% ^
             -DECM_DIR=%INSTALLDIR%\share\ECM\cmake ^
+            -DCMAKE_PREFIX_PATH=%QT_ROOT_DIR%;%INSTALLDIR% ^
             -DCMAKE_CXX_FLAGS="/I%GITHUB_WORKSPACE%\dep-install\include"
 
           ninja -C build install
           cd ..
+
+      - name: Verify MpvQtConfig.cmake exists
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $depInstall = Join-Path (Get-Location).Path "dep-install"
+          $hits = Get-ChildItem -Recurse -Path (Join-Path $depInstall "lib\cmake") -Filter "MpvQtConfig.cmake" -ErrorAction SilentlyContinue
+          if (-not $hits) {
+            Write-Host "Contents of dep-install\lib\cmake:"
+            Get-ChildItem -Recurse -Path (Join-Path $depInstall "lib\cmake") -ErrorAction SilentlyContinue | Select-Object FullName
+            throw "MpvQtConfig.cmake was not installed. mpvqt build/install did not produce a CMake package."
+          }
+          $hits | Select-Object FullName
 
       - name: Download Stage VC Redist and OpenSSL
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path bundle\win | Out-Null
-
           Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile bundle\win\vcredist_x64.exe
-
           Invoke-WebRequest -Uri "https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-3.6.0.zip" -OutFile openssl.zip
           Expand-Archive openssl.zip -DestinationPath openssl-temp -Force
-
           $binPath = (Get-ChildItem -Path openssl-temp -Recurse -Filter libssl-3-x64.dll | Select-Object -First 1).DirectoryName
           Copy-Item -Force (Join-Path $binPath "libssl-3-x64.dll") dep-install\
           Copy-Item -Force (Join-Path $binPath "libcrypto-3-x64.dll") dep-install\
-
           Remove-Item -Recurse -Force openssl-temp, openssl.zip
 
       - name: Patch WiX Bundle.wxs (vcredist location)
@@ -151,16 +158,13 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          # 1) src/CMakeLists.txt: strip mpris/taskbar and Qt6::DBus/Qt6::WinExtras from CI build
           $cmakeFile = "src/CMakeLists.txt"
           $content = Get-Content $cmakeFile -Raw -Encoding UTF8
           $content = [regex]::Replace($content, '(?mi)^\s*add_subdirectory\(\s*mpris\s*\)\s*$', '')
           $content = [regex]::Replace($content, '(?mi)^\s*add_subdirectory\(\s*taskbar\s*\)\s*$', '')
           $content = $content.Replace("Qt6::DBus", "").Replace("Qt6::WinExtras", "")
           Set-Content $cmakeFile $content -Encoding UTF8
-          Write-Host "Patched src/CMakeLists.txt (mpris/taskbar removed for CI)."
 
-          # 2) ComponentManager.cpp: strip component references removed above
           $compMgr = "src/core/ComponentManager.cpp"
           if (Test-Path $compMgr) {
             $c = Get-Content $compMgr -Raw -Encoding UTF8
@@ -171,58 +175,42 @@ jobs:
             $c = [regex]::Replace($c, '(?mi)^\s*.*MprisComponent.*\r?\n', '')
             $c = [regex]::Replace($c, '(?mi)^\s*.*TaskbarComponent.*\r?\n', '')
             Set-Content $compMgr $c -Encoding UTF8
-            Write-Host "Patched ComponentManager.cpp (mpris/taskbar refs removed)."
           }
 
-          # 3) WindowManager.cpp: strip taskbar references (if present)
           $winMgr = "src/ui/WindowManager.cpp"
           if (Test-Path $winMgr) {
             $w = Get-Content $winMgr -Raw -Encoding UTF8
             $w = [regex]::Replace($w, '(?mi)^\s*.*TaskbarComponent.*\r?\n', '')
             Set-Content $winMgr $w -Encoding UTF8
-            Write-Host "Patched WindowManager.cpp (taskbar refs removed)."
           }
 
-          # 4) Ensure windows.h include in CodecsComponent.cpp
           $codecs = "src/player/CodecsComponent.cpp"
           if (Test-Path $codecs) {
             $cc = Get-Content $codecs -Raw -Encoding UTF8
             if ($cc -notmatch '(?m)^\s*#include\s+<windows\.h>\s*$') {
               $cc = "#include <windows.h>`r`n" + $cc
               Set-Content $codecs $cc -Encoding UTF8
-              Write-Host "Patched CodecsComponent.cpp (added windows.h)."
             }
           }
 
-          # 5) Patch src/main.cpp: remove hard-force OpenGL renderer selection
           $main = "src/main.cpp"
           if (Test-Path $main) {
             $m = Get-Content $main -Raw -Encoding UTF8
-            $orig = $m
-
             $m = $m -replace '(?m)^\s*QQuickWindow::setGraphicsApi\(\s*QSGRendererInterface::OpenGL\s*\)\s*;\s*$', ''
             $m = $m -replace '(?m)^\s*QCoreApplication::setAttribute\(\s*Qt::AA_ShareOpenGLContexts\s*\)\s*;\s*$', ''
-
-            if ($m -ne $orig) {
-              Set-Content -Path $main -Value $m -Encoding UTF8
-              Write-Host "Patched src/main.cpp (removed forced OpenGL graphics API + ShareOpenGLContexts)."
-            } else {
-              Write-Host "src/main.cpp: no forced OpenGL lines found."
-            }
+            Set-Content -Path $main -Value $m -Encoding UTF8
           }
 
-          # 6) Disable qt.conf install generation rules
           $filesToPatch = @("CMakeModules/CPackConfiguration.cmake","CMakeModules/QtConfiguration.cmake")
           foreach ($f in $filesToPatch) {
             if (-not (Test-Path $f)) { continue }
             $t = Get-Content $f -Raw -Encoding UTF8
-            $orig = $t
             $t = [regex]::Replace($t, '(?mi)^\s*install\s*\(\s*FILES\s+\$\{CMAKE_SOURCE_DIR\}/bundle/win/qt\.conf\s+DESTINATION\s+\.\s*\)\s*$', '# CI: qt.conf disabled')
             $t = [regex]::Replace($t, '(?mi)^\s*file\s*\(\s*WRITE\s+\$\{QT_ROOT\}/bin/qt\.conf\s+.*$', '# CI: qt.conf disabled')
-            if ($t -ne $orig) { Set-Content -Path $f -Value $t -Encoding UTF8 }
+            Set-Content -Path $f -Value $t -Encoding UTF8
           }
 
-      - name: Build Jellyfin Desktop (Fix MpvQt lookup)
+      - name: Build Jellyfin Desktop
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -233,7 +221,6 @@ jobs:
           $incMpv = Join-Path $depInstall "include"
           $installPrefix = Join-Path $root "output"
 
-          # Override FindMPV.cmake to use our staged mpv
           $cmakeMod = "CMakeModules/FindMPV.cmake"
           $overrideContent = @"
           set(MPV_FOUND TRUE)
@@ -241,7 +228,6 @@ jobs:
           set(MPV_LIBRARY "$libMpv")
           set(MPV_LIBRARIES "$libMpv")
           set(MPV_INCLUDE_DIRS "$incMpv")
-          
           if(NOT TARGET MPV::MPV)
             add_library(MPV::MPV UNKNOWN IMPORTED)
             set_target_properties(MPV::MPV PROPERTIES
@@ -255,10 +241,13 @@ jobs:
           $qtRootDir = $env:QT_ROOT_DIR
           if (-not $qtRootDir) { throw "QT_ROOT_DIR is not set (install-qt-action env missing)" }
 
-          # Sanity: show MpvQtConfig.cmake if present (debug only)
-          Get-ChildItem -Recurse -Path (Join-Path $depInstall "lib\cmake") -Filter "MpvQtConfig.cmake" -ErrorAction SilentlyContinue | Select-Object FullName
+          # Find where MpvQtConfig.cmake actually landed
+          $mpvQtConfig = Get-ChildItem -Recurse -Path (Join-Path $depInstall "lib\cmake") -Filter "MpvQtConfig.cmake" | Select-Object -First 1
+          if (-not $mpvQtConfig) { throw "MpvQtConfig.cmake missing even after verification step." }
+          $mpvQtDir = Split-Path $mpvQtConfig.FullName -Parent
+          Write-Host "Using MpvQt_DIR=$mpvQtDir"
 
-          cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$qtRootDir`" ."
+          cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$qtRootDir`" -DMpvQt_DIR=`"$mpvQtDir`" ."
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
           Push-Location build
@@ -270,7 +259,6 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
           $root = (Get-Location).Path
           $outDir = Join-Path $root "output"
           if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
@@ -320,13 +308,9 @@ jobs:
           @'
           @echo off
           setlocal
-          REM Safe renderer choice for Intel/older NVIDIA: use D3D11 RHI
           set QSG_RHI_BACKEND=d3d11
           start "" "%~dp0Jellyfin Desktop.exe" %*
           '@ | Set-Content -Path (Join-Path $outDir "Jellyfin Desktop (Safe).cmd") -Encoding ASCII
-
-          Write-Host "--- Output Dir ---"
-          Get-ChildItem $outDir | Select-Object Name
 
       - name: Create Portable Zip
         shell: pwsh
