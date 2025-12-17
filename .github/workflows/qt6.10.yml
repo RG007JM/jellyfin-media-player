@@ -83,13 +83,14 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip" -OutFile sdl2.zip
           Expand-Archive sdl2.zip -DestinationPath sdl2-temp -Force
           $root = (Get-ChildItem sdl2-temp | Select-Object -First 1).FullName
+
           Copy-Item -Recurse -Force "$root\*" dep-install\
           Copy-Item -Force "$root\lib\x64\SDL2.lib" dep-install\
           Copy-Item -Force "$root\lib\x64\SDL2main.lib" dep-install\
           Copy-Item -Force "$root\lib\x64\SDL2.dll" dep-install\
           Remove-Item -Recurse -Force sdl2-temp, sdl2.zip
 
-      - name: Prepare ECM and MpvQt (install into dep-install)
+      - name: Prepare ECM and MpvQt
         shell: cmd
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
@@ -120,13 +121,16 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path bundle\win | Out-Null
+
           Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile bundle\win\vcredist_x64.exe
 
           Invoke-WebRequest -Uri "https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-3.6.0.zip" -OutFile openssl.zip
           Expand-Archive openssl.zip -DestinationPath openssl-temp -Force
+
           $binPath = (Get-ChildItem -Path openssl-temp -Recurse -Filter libssl-3-x64.dll | Select-Object -First 1).DirectoryName
           Copy-Item -Force (Join-Path $binPath "libssl-3-x64.dll") dep-install\
           Copy-Item -Force (Join-Path $binPath "libcrypto-3-x64.dll") dep-install\
+
           Remove-Item -Recurse -Force openssl-temp, openssl.zip
 
       - name: Patch WiX Bundle.wxs (vcredist location)
@@ -146,7 +150,6 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          # 1) src/CMakeLists.txt: strip mpris/taskbar and Qt6::DBus/Qt6::WinExtras from CI build
           $cmakeFile = "src/CMakeLists.txt"
           $content = Get-Content $cmakeFile -Raw -Encoding UTF8
           $content = [regex]::Replace($content, '(?mi)^\s*add_subdirectory\(\s*mpris\s*\)\s*$', '')
@@ -154,7 +157,6 @@ jobs:
           $content = $content.Replace("Qt6::DBus", "").Replace("Qt6::WinExtras", "")
           Set-Content $cmakeFile $content -Encoding UTF8
 
-          # 2) ComponentManager.cpp: strip component references removed above
           $compMgr = "src/core/ComponentManager.cpp"
           if (Test-Path $compMgr) {
             $c = Get-Content $compMgr -Raw -Encoding UTF8
@@ -167,7 +169,6 @@ jobs:
             Set-Content $compMgr $c -Encoding UTF8
           }
 
-          # 3) WindowManager.cpp: strip taskbar references (if present)
           $winMgr = "src/ui/WindowManager.cpp"
           if (Test-Path $winMgr) {
             $w = Get-Content $winMgr -Raw -Encoding UTF8
@@ -175,7 +176,6 @@ jobs:
             Set-Content $winMgr $w -Encoding UTF8
           }
 
-          # 4) Ensure windows.h include in CodecsComponent.cpp
           $codecs = "src/player/CodecsComponent.cpp"
           if (Test-Path $codecs) {
             $cc = Get-Content $codecs -Raw -Encoding UTF8
@@ -185,7 +185,6 @@ jobs:
             }
           }
 
-          # 5) Patch src/main.cpp: remove hard-force OpenGL renderer selection
           $main = "src/main.cpp"
           if (Test-Path $main) {
             $m = Get-Content $main -Raw -Encoding UTF8
@@ -194,7 +193,6 @@ jobs:
             Set-Content -Path $main -Value $m -Encoding UTF8
           }
 
-          # 6) Disable qt.conf install generation rules
           $filesToPatch = @("CMakeModules/CPackConfiguration.cmake","CMakeModules/QtConfiguration.cmake")
           foreach ($f in $filesToPatch) {
             if (-not (Test-Path $f)) { continue }
@@ -215,7 +213,7 @@ jobs:
           $incMpv = Join-Path $depInstall "include"
           $installPrefix = Join-Path $root "output"
 
-          # --- Override FindMPV.cmake to use our staged mpv ---
+          # Override FindMPV.cmake to use our staged mpv
           $cmakeMod = "CMakeModules/FindMPV.cmake"
           $overrideContent = @"
           set(MPV_FOUND TRUE)
@@ -234,16 +232,19 @@ jobs:
           "@
           Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
-          # --- NEW: Provide FindMpvQt.cmake so we do not need MpvQtConfig.cmake ---
+          # Provide FindMpvQt.cmake so we do not need MpvQtConfig.cmake
           $findMpvQt = "CMakeModules/FindMpvQt.cmake"
 
+          # IMPORTANT: build the candidate paths as strings; do NOT call Join-Path inside @()
           $libCandidates = @(
-            Join-Path $depInstall "lib\MpvQt.lib",
-            Join-Path $depInstall "lib\mpvqt.lib"
+            (Join-Path $depInstall "lib\MpvQt.lib"),
+            (Join-Path $depInstall "lib\mpvqt.lib")
           )
+
           $libFound = $libCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $libFound) {
-            $libFound = Get-ChildItem -Path (Join-Path $depInstall "lib") -Filter "*mpvqt*.lib" -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object FullName
+            $libFound = Get-ChildItem -Path (Join-Path $depInstall "lib") -Filter "*mpvqt*.lib" -ErrorAction SilentlyContinue |
+              Select-Object -First 1 | ForEach-Object FullName
           }
           if (-not $libFound) {
             Write-Host "dep-install\lib contents:"
@@ -283,6 +284,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
           $root = (Get-Location).Path
           $outDir = Join-Path $root "output"
           if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
@@ -335,6 +337,9 @@ jobs:
           set QSG_RHI_BACKEND=d3d11
           start "" "%~dp0Jellyfin Desktop.exe" %*
           '@ | Set-Content -Path (Join-Path $outDir "Jellyfin Desktop (Safe).cmd") -Encoding ASCII
+
+          Write-Host "--- Output Dir ---"
+          Get-ChildItem $outDir | Select-Object Name
 
       - name: Create Portable Zip
         shell: pwsh
