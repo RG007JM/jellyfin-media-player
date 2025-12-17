@@ -107,7 +107,13 @@ jobs:
           powershell -Command "$c = Get-Content src\mpvcontroller.h -Raw; $c = $c -replace 'virtual ~MpvController\(\);', ''; $c = $c -replace 'MpvController\(\);', ''; $c = $c.Replace('explicit MpvController(QObject* parent = nullptr);', 'explicit MpvController(QObject* parent = nullptr);' + [Environment]::NewLine + '  virtual ~MpvController() {}'); Set-Content src\mpvcontroller.h $c"
           echo.> src\dummy.cpp
           echo MpvController::MpvController() = default;>> src\dummy.cpp
-          cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=%INSTALLDIR% -DCMAKE_PREFIX_PATH=%INSTALLDIR%\lib\cmake;%Qt6_DIR% -DECM_DIR=%INSTALLDIR%\share\ECM\cmake -DCMAKE_CXX_FLAGS="/I%GITHUB_WORKSPACE%\dep-install\include"
+
+          REM FIX: configure mpvqt with proper prefix paths (Qt + ECM are in INSTALLDIR + QT_ROOT_DIR)
+          cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=%INSTALLDIR% ^
+            -DCMAKE_PREFIX_PATH=%INSTALLDIR%;%QT_ROOT_DIR% ^
+            -DECM_DIR=%INSTALLDIR%\share\ECM\cmake ^
+            -DCMAKE_CXX_FLAGS="/I%GITHUB_WORKSPACE%\dep-install\include"
+
           ninja -C build install
           cd ..
 
@@ -188,7 +194,7 @@ jobs:
             }
           }
 
-          # 5) Patch src/main.cpp: remove hard-force OpenGL renderer selection (Qt6 should choose; on Windows default is D3D11)
+          # 5) Patch src/main.cpp: remove hard-force OpenGL renderer selection
           $main = "src/main.cpp"
           if (Test-Path $main) {
             $m = Get-Content $main -Raw -Encoding UTF8
@@ -216,7 +222,7 @@ jobs:
             if ($t -ne $orig) { Set-Content -Path $f -Value $t -Encoding UTF8 }
           }
 
-      - name: Build Jellyfin Desktop
+      - name: Build Jellyfin Desktop (Fix MpvQt lookup)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -225,7 +231,6 @@ jobs:
           $depInstall = Join-Path $root "dep-install"
           $libMpv = Join-Path $depInstall "lib\libmpv.lib"
           $incMpv = Join-Path $depInstall "include"
-          $mpvQtDir = Join-Path $depInstall "lib\cmake\MpvQt"
           $installPrefix = Join-Path $root "output"
 
           # Override FindMPV.cmake to use our staged mpv
@@ -248,9 +253,12 @@ jobs:
           Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
           $qtRootDir = $env:QT_ROOT_DIR
-          if (-not $qtRootDir) { throw "QTROOTDIR is not set (install-qt-action env missing)" }
+          if (-not $qtRootDir) { throw "QT_ROOT_DIR is not set (install-qt-action env missing)" }
 
-          cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$qtRootDir`" -DMpvQt_DIR=`"$mpvQtDir`" ."
+          # Sanity: show MpvQtConfig.cmake if present (debug only)
+          Get-ChildItem -Recurse -Path (Join-Path $depInstall "lib\cmake") -Filter "MpvQtConfig.cmake" -ErrorAction SilentlyContinue | Select-Object FullName
+
+          cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$qtRootDir`" ."
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
           Push-Location build
@@ -269,12 +277,11 @@ jobs:
 
           $depInstall = Join-Path $root "dep-install"
           $qtRootDir = $env:QT_ROOT_DIR
-          if (-not $qtRootDir) { throw "QTROOTDIR is not set" }
+          if (-not $qtRootDir) { throw "QT_ROOT_DIR is not set" }
 
           $qtBin = Join-Path $qtRootDir "bin"
           if (-not (Test-Path $qtBin)) { throw "Qt bin path not found: $qtBin" }
 
-          # Copy a minimal Qt DLL set (kept from your previous workflow)
           $qtDlls = @(
             "Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Network.dll",
             "Qt6Quick.dll","Qt6Qml.dll","Qt6Svg.dll","Qt6OpenGL.dll",
@@ -286,7 +293,6 @@ jobs:
             if (Test-Path $src) { Copy-Item -Force $src $outDir }
           }
 
-          # WebEngine resources + process
           $resSrc = Join-Path $qtRootDir "resources"
           if (Test-Path $resSrc) {
             New-Item -ItemType Directory -Force -Path (Join-Path $outDir "resources") | Out-Null
@@ -295,12 +301,10 @@ jobs:
           $processExe = Join-Path $qtBin "QtWebEngineProcess.exe"
           if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
 
-          # mpv + OpenSSL staged DLLs
           Copy-Item -Force (Join-Path $depInstall "bin\libmpv-2.dll") $outDir
           Copy-Item -Force (Join-Path $depInstall "libssl-3-x64.dll") $outDir
           Copy-Item -Force (Join-Path $depInstall "libcrypto-3-x64.dll") $outDir
 
-          # Run windeployqt
           $exePath = Join-Path $outDir "Jellyfin Desktop.exe"
           $qmlArgs = @()
           if (Test-Path (Join-Path $depInstall "lib\qml")) {
@@ -310,11 +314,9 @@ jobs:
 
           & (Join-Path $qtBin "windeployqt.exe") --release --force --qmldir src\ui @qmlArgs --compiler-runtime --xml $exePath
 
-          # Remove stray qt.conf files if created
           Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $outDir "qt.conf")
           Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $outDir "qt.qt.conf")
 
-          # Add a Safe launcher (D3D11 RHI)
           @'
           @echo off
           setlocal
