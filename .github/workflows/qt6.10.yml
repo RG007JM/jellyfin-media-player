@@ -37,44 +37,42 @@ jobs:
         key: angle-win64-${{ runner.os }}-${{ hashFiles('.github/workflows/**') }}
         restore-keys: |
           angle-win64-${{ runner.os }}-
-
-    - name: Build ANGLE (shallow checkout + runhooks)
+          
+    - name: Build ANGLE (from source, isolated from repo gclient)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
+        # Required on Windows when not using Google's internal toolchain. [file:456]
         $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
-
+        # Work outside the repo so gclient doesn't pick up this repo's .gclient / branch overrides.
+        $angleRoot = Join-Path $env:RUNNER_TEMP "angle-client"
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $angleRoot
+        New-Item -ItemType Directory -Force -Path $angleRoot | Out-Null
+        # depot_tools (keep in temp too)
         $depot = Join-Path $env:RUNNER_TEMP "depot_tools"
         if (-not (Test-Path $depot)) {
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $depot
         }
         $env:Path = "$depot;$env:Path"
-
         Push-Location $depot
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
-
-        $srcRoot = Join-Path $env:RUNNER_TEMP "angle-src"
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $srcRoot
-        New-Item -ItemType Directory -Force -Path $srcRoot | Out-Null
-
-        # Shallow clone ANGLE (avoids huge "resolving deltas" stalls). [web:447]
-        Push-Location $srcRoot
-        git clone --depth 1 https://chromium.googlesource.com/angle/angle.git angle
-        Push-Location angle
-
-        # Bootstrap buildtools/gn via gclient hooks (fixes missing gn.exe). [web:419]
-        gclient config --unmanaged https://chromium.googlesource.com/angle/angle.git
-        gclient runhooks
-
+        # Make gclient treat $angleRoot as the client root (prevents it inheriting repo settings)
+        $env:GCLIENT_ROOT = $angleRoot
+        # Official checkout flow. [file:456]
+        Push-Location $angleRoot
+        fetch angle
+        Pop-Location
+        # Build ANGLE
+        $src = Join-Path $angleRoot "angle"
+        Push-Location $src
         gn gen out/Release --args="is_debug=false target_cpu=""x64"" is_component_build=true"
         autoninja -C out/Release
         Pop-Location
-        Pop-Location
-
+        # Stage DLLs into dep-install/bin so your existing deploy step ships them. [file:368]
         New-Item -ItemType Directory -Force -Path "dep-install/bin" | Out-Null
-        Copy-Item -Force (Join-Path $srcRoot "angle/out/Release/libEGL.dll")    "dep-install/bin/libEGL.dll"
-        Copy-Item -Force (Join-Path $srcRoot "angle/out/Release/libGLESv2.dll") "dep-install/bin/libGLESv2.dll"
+        Copy-Item -Force (Join-Path $src "out/Release/libEGL.dll")    "dep-install/bin/libEGL.dll"
+        Copy-Item -Force (Join-Path $src "out/Release/libGLESv2.dll") "dep-install/bin/libGLESv2.dll"
 
     - name: Cache ANGLE checkout
       uses: actions/cache@v4
