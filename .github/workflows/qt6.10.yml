@@ -244,6 +244,13 @@ jobs:
         # 7) Remove qt.conf files from repo tree (optional but matches "remove everywhere")
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
+
+
+        # 8) Check if OpenGL is still forced)
+        Write-Host "---- main.cpp forced API check ----"
+        Select-String -Path "src/main.cpp" -Pattern "setGraphicsApi","QSG_RHI_BACKEND","AA_ShareOpenGLContexts","forceCompatOpenGL" -SimpleMatch -List | ForEach-Object { $_.Line }
+        Write-Host "-----------------------------------"
+
     
         Write-Host "Source patched (no forced graphics API; closer to Qt5 behavior)."
 
@@ -348,10 +355,12 @@ jobs:
         Write-Host "--- Content of Output Dir ---"
         Get-ChildItem $outDir | Select-Object Name
 
-
     - name: Create Portable Zip
       shell: pwsh
-      run: Compress-Archive -Path output\* -DestinationPath Jellyfin-Desktop-Portable.zip
+      run: |
+        if (Test-Path "Jellyfin-Desktop-Portable.zip") { Remove-Item -Force "Jellyfin-Desktop-Portable.zip" }
+        Compress-Archive -Path "output\*" -DestinationPath "Jellyfin-Desktop-Portable.zip"
+
 
     - name: Upload Portable Zip
       uses: actions/upload-artifact@v4
