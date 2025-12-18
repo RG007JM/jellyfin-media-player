@@ -1,4 +1,4 @@
-name: Build Qt6.10 Windows x64 (DesktopGL + QSG diagnostics + ANGLE DLLs)
+name: Build Qt6.10 Windows x64 (DesktopGL + WebEngine ANGLE runtime)
 
 on:
   workflow_dispatch:
@@ -110,6 +110,26 @@ jobs:
         Copy-Item "$binPath\libssl-3-x64.dll" "dep-install\bin\"
         Copy-Item "$binPath\libcrypto-3-x64.dll" "dep-install\bin\"
 
+    - name: Download ANGLE runtime (libEGL/libGLESv2)
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        New-Item -ItemType Directory -Force -Path "dep-install/angle" | Out-Null
+
+        # NOTE: Qt6 MSVC packages do not include libEGL/libGLESv2 anymore; ship them yourself. [web:369][web:299]
+        # Replace this URL if needed with any ZIP containing libEGL.dll and libGLESv2.dll for Windows x64.
+        $url = "https://github.com/google/angle/releases/download/chromium/angle-win64.zip"
+        Invoke-WebRequest -Uri $url -OutFile "angle.zip" -MaximumRedirection 10
+        Expand-Archive "angle.zip" -DestinationPath "dep-install/angle" -Force
+
+        $egl = Get-ChildItem -Recurse "dep-install/angle" -Filter "libEGL.dll" | Select-Object -First 1
+        $gles = Get-ChildItem -Recurse "dep-install/angle" -Filter "libGLESv2.dll" | Select-Object -First 1
+        if (-not $egl) { throw "ANGLE package missing libEGL.dll" }
+        if (-not $gles) { throw "ANGLE package missing libGLESv2.dll" }
+
+        Copy-Item -Force $egl.FullName "dep-install/bin/libEGL.dll"
+        Copy-Item -Force $gles.FullName "dep-install/bin/libGLESv2.dll"
+
     - name: Patch WiX Bundle.wxs
       shell: pwsh
       run: |
@@ -121,69 +141,22 @@ jobs:
           Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (DesktopGL + QSG diagnostics + keep libmpv)
+    - name: Patch Source Code (DesktopGL + QSG diagnostics)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
         $NL = [Environment]::NewLine
 
-        # 1) Patch src/CMakeLists.txt (strip optional components)
-        $cmakeFile = "src/CMakeLists.txt"
-        if (Test-Path $cmakeFile) {
-          $content = Get-Content $cmakeFile -Raw -Encoding UTF8
-          $content = [regex]::Replace($content, '(?mi)^.*mpris.*$', '')
-          $content = [regex]::Replace($content, '(?mi)^.*taskbar.*$', '')
-          $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
-          Set-Content -Path $cmakeFile -Value $content -Encoding UTF8
-        }
-
-        # 2) Patch src/core/ComponentManager.cpp
-        $compMgr = "src/core/ComponentManager.cpp"
-        if (Test-Path $compMgr) {
-          $compContent = Get-Content $compMgr -Raw -Encoding UTF8
-          $compContent = [regex]::Replace($compContent, '(?mi)^\s*#include\s+.*MprisComponent\.h.*$', '')
-          $compContent = [regex]::Replace($compContent, '(?mi)^\s*#include\s+.*TaskbarComponent\.h.*$', '')
-          $compContent = [regex]::Replace($compContent, '(?mi)^.*MprisComponent.*$', '')
-          $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
-          Set-Content -Path $compMgr -Value $compContent -Encoding UTF8
-        }
-
-        # 3) Patch src/ui/WindowManager.cpp
-        $winMgr = "src/ui/WindowManager.cpp"
-        if (Test-Path $winMgr) {
-          $winContent = Get-Content $winMgr -Raw -Encoding UTF8
-          $winContent = [regex]::Replace($winContent, '(?mi)^.*TaskbarComponent.*$', '')
-          Set-Content -Path $winMgr -Value $winContent -Encoding UTF8
-        }
-
-        # 4) CodecsComponent.cpp: ensure windows.h is included (idempotent)
-        $codecs = "src/player/CodecsComponent.cpp"
-        if (Test-Path $codecs) {
-          $c = Get-Content $codecs -Raw -Encoding UTF8
-          if ($c -notmatch '(?m)^\s*#include\s+<windows\.h>') {
-            $c = "#include <windows.h>$NL$c"
-            Set-Content -Path $codecs -Value $c -Encoding UTF8
-          }
-        }
-
-        # 5) main.cpp: inject DesktopGL + scenegraph diagnostics
         $main = "src/main.cpp"
         if (Test-Path $main) {
           $m = Get-Content $main -Raw -Encoding UTF8
 
-          # Remove any previous CI injections to keep idempotent
-          $m = [regex]::Replace($m,'(?m)^\s*// \(CI patch\) QSG diagnostics.*(?:\r?\n.*){0,40}','')
-          $m = [regex]::Replace($m,'(?m)^\s*// \(CI patch\) DesktopGL for Qt Quick.*(?:\r?\n.*){0,40}','')
           $m = [regex]::Replace($m,'^[ \t]*QQuickWindow::setGraphicsApi\(.*\)\s*;\s*\r?\n','',[System.Text.RegularExpressions.RegexOptions]::Multiline)
           $m = [regex]::Replace($m,'^[ \t]*QCoreApplication::setAttribute\(\s*Qt::AA_ShareOpenGLContexts\s*\)\s*;\s*\r?\n','',[System.Text.RegularExpressions.RegexOptions]::Multiline)
-          $m = [regex]::Replace($m,'^[ \t]*qputenv\(\s*"QSG_RHI_BACKEND"\s*,\s*".*?"\s*\)\s*;\s*\r?\n','',[System.Text.RegularExpressions.RegexOptions]::Multiline)
 
           $inject = @(
-            '    // (CI patch) QSG diagnostics for black-window issues'
             '    qputenv("QSG_INFO", "1");'
             '    qputenv("QT_LOGGING_RULES", "qt.scenegraph.general=true;qt.scenegraph.renderloop=true;qt.quick.window=true;qt.qpa.*=true");'
-            ''
-            '    // (CI patch) DesktopGL for Qt Quick (avoid OpenGLES/ANGLE packaging issues on Qt6)'
             '#ifdef Q_OS_WIN'
             '    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);'
             '#endif'
@@ -201,23 +174,6 @@ jobs:
 
           Set-Content -Path $main -Value $m -Encoding UTF8
         }
-
-        # 6) Remove qt.conf install + generation
-        $filesToPatch = @("CMakeModules/CPackConfiguration.cmake","CMakeModules/QtConfiguration.cmake")
-        foreach ($f in $filesToPatch) {
-          if (-not (Test-Path $f)) { continue }
-          $t = Get-Content $f -Raw -Encoding UTF8
-          $orig = $t
-          $t = [regex]::Replace($t,'(?mi)^\s*install\s*\(\s*FILES\s+\$\{CMAKE_SOURCE_DIR\}/bundle/win/qt\.conf\s+DESTINATION\s+\.\s*\)\s*$','# (CI patch) qt.conf disabled')
-          $t = [regex]::Replace($t,'(?mi)^\s*file\s*\(\s*WRITE\s+\$\{QTROOT\}/bin/qt\.conf\s+\$\{QTCONFCONTENT\}\s*\)\s*$','# (CI patch) qt.conf disabled')
-          if ($t -ne $orig) { Set-Content -Path $f -Value $t -Encoding UTF8 }
-        }
-
-        # 7) Remove qt.conf files from repo tree
-        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
-        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
-
-        Write-Host "Patched for DesktopGL + QSG diagnostics; libmpv is NOT disabled."
 
     - name: Build Jellyfin Desktop
       shell: pwsh
@@ -252,7 +208,7 @@ jobs:
         Set-Location build
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
 
-    - name: Deploy Qt and Finalize (copy ANGLE DLLs)
+    - name: Deploy Qt and Finalize
       shell: pwsh
       run: |
         $outDir = "$((Get-Location).Path)/output"
@@ -260,66 +216,19 @@ jobs:
         if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
 
         $qtRootDir = $env:QT_ROOT_DIR
-        if (-not $qtRootDir) { throw "QT_ROOT_DIR is not set (install-qt-action env missing)" }
-
         $qtBin = Join-Path $qtRootDir "bin"
-        if (-not (Test-Path $qtBin)) { throw "Qt bin path not found: $qtBin (QT_ROOT_DIR=$qtRootDir)" }
 
-        Write-Host "Detected Qt Bin Path: $qtBin"
-
-        # Copy key Qt DLLs
-        $qtDlls = @(
-          "Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Network.dll",
-          "Qt6Quick.dll","Qt6Qml.dll","Qt6Svg.dll","Qt6OpenGL.dll",
-          "Qt6QmlModels.dll","Qt6QmlWorkerScript.dll",
-          "Qt6WebEngineCore.dll","Qt6WebEngineQuick.dll"
-        )
-        foreach ($q in $qtDlls) {
-          $src = Join-Path $qtBin $q
-          if (Test-Path $src) { Copy-Item -Force $src $outDir } else { Write-Warning "Could not find $src" }
-        }
-
-        # ---- NEW: Ensure ANGLE runtime DLLs are deployed for QtWebEngine GPU ----
-        # These are required for the default WebEngine ANGLE/GLES path on Windows.
-        $angleDlls = @("libEGL.dll","libGLESv2.dll")
-        foreach ($a in $angleDlls) {
-          $src = Join-Path $qtBin $a
-          if (Test-Path $src) { Copy-Item -Force $src $outDir } else { Write-Warning "Could not find $src" }
-        }
-        # ----------------------------------------------------------------------
-
-        # WebEngine resources
-        $qtRoot = Split-Path $qtBin -Parent
-        $resSrc = Join-Path $qtRoot "resources"
-        if (Test-Path $resSrc) {
-          New-Item -ItemType Directory -Force -Path (Join-Path $outDir "resources") | Out-Null
-          Copy-Item -Force -Recurse (Join-Path $resSrc "*") (Join-Path $outDir "resources")
-        }
-
-        # QtWebEngineProcess
         $processExe = Join-Path $qtBin "QtWebEngineProcess.exe"
         if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
 
-        # Deps (mpv, sdl2, openssl, etc)
         Copy-Item -Force "$depInstall/bin/*.dll" $outDir
 
         $exePath = Join-Path $outDir "Jellyfin Desktop.exe"
-        $qmlArgs = @()
-        if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
-
-        Write-Host "Running windeployqt..."
-        & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
-
-        if (Test-Path "$outDir\qt.conf")  { Remove-Item -Force "$outDir\qt.conf" }
-        if (Test-Path "$outDir\.qt.conf") { Remove-Item -Force "$outDir\.qt.conf" }
+        & "windeployqt" --release --force --qmldir src/ui --compiler-runtime --xml "$exePath"
 
         $mpvConf = Join-Path $outDir "mpv.conf"
-        @(
-          "msg-level=all=v"
-          "log-file=mpv.log"
-        ) | Set-Content -Encoding UTF8 $mpvConf
+        @("msg-level=all=v","log-file=mpv.log") | Set-Content -Encoding UTF8 $mpvConf
 
-        Write-Host "--- Content of Output Dir ---"
         Get-ChildItem $outDir | Select-Object Name
 
     - name: Create Portable Zip
@@ -333,17 +242,3 @@ jobs:
       with:
         name: jellyfin-desktop-portable
         path: Jellyfin-Desktop-Portable.zip
-
-    - name: Build Installer Package
-      shell: cmd
-      run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        set PATH=%PATH%;C:\Program Files (x86)\WiX Toolset v3.11\bin
-        cd build
-        ninja windows_package
-
-    - name: Archive installer
-      uses: actions/upload-artifact@v4
-      with:
-        name: jellyfin-desktop-windows
-        path: build/JellyfinDesktop-*.exe
