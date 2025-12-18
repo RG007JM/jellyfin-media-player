@@ -74,6 +74,17 @@ jobs:
         Copy-Item -Force "$root\lib\x64\SDL2.lib" "dep-install\lib\"
         Copy-Item -Force "$root\lib\x64\SDL2main.lib" "dep-install\lib\"
         Copy-Item -Force "$root\lib\x64\SDL2.dll" "dep-install\bin\"
+
+    - name: Cache ECM+mpvqt install
+      id: cache-ecm-mpvqt
+      uses: actions/cache@v4
+      with:
+        path: |
+          dep-install
+        key: ${{ runner.os }}-ecm-mpvqt-${{ hashFiles('.github/workflows/**', 'Qt6.10-1612.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-ecm-mpvqt-
+    
     - name: Prepare ECM and MpvQt
       shell: cmd
       run: |
@@ -81,19 +92,50 @@ jobs:
         set "INSTALL_DIR=%GITHUB_WORKSPACE%\dep-install"
         set "INSTALL_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install"
         set "INCLUDE_DIR_FWD=%GITHUB_WORKSPACE:\=/%/dep-install/include"
+    
         git clone https://github.com/KDE/extra-cmake-modules.git
         cd extra-cmake-modules
         cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
         ninja -C build install
         cd ..
+    
         git clone --branch v1.1.1 https://github.com/KDE/mpvqt.git
         cd mpvqt
+    
+        REM --- Existing: MpvController dtor patch (keep) ---
         powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
         echo. >> src\mpvcontroller.cpp
         echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
+    
+        REM --- NEW: locate mpv_render_context_create callsite (for log visibility) ---
+        powershell -Command "$m = Get-ChildItem -Recurse -File src | Select-String -Pattern 'mpv_render_context_create' -List; if(-not $m){ throw 'mpvqt: mpv_render_context_create not found (cannot fix No render context set).'}; Write-Host ('mpvqt: render context create in ' + $m[0].Path)"
+    
+        REM --- NEW: force mpvqt to request OpenGL render API for libmpv (ANGLE/EGL on Windows) ---
+        REM mpv fails with 'No render context set' if the host never creates a render context. [web:143]
+        powershell -Command ^
+          "$ErrorActionPreference='Stop'; ^
+           $m = Get-ChildItem -Recurse -File src | Select-String -Pattern 'mpv_render_context_create' -List; ^
+           if(-not $m){ throw 'mpvqt: mpv_render_context_create not found. Cannot patch render backend.' }; ^
+           $path = $m[0].Path; ^
+           $c = Get-Content $path -Raw -Encoding UTF8; ^
+           $orig = $c; ^
+           # If mpvqt already specifies MPV_RENDER_PARAM_API_TYPE, do not touch it. ^
+           if($c -notmatch 'MPV_RENDER_PARAM_API_TYPE'){ ^
+             # Replace a typical call: mpv_render_context_create(&ctx, mpv, params); or similar. ^
+             # Insert params[] with MPV_RENDER_API_TYPE_OPENGL and pass it to mpv_render_context_create. ^
+             $c = [regex]::Replace($c, 'mpv_render_context_create\(\s*&(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)\s*;', ^
+               'mpv_render_param params[] = { { MPV_RENDER_PARAM_API_TYPE, (void*)MPV_RENDER_API_TYPE_OPENGL }, { MPV_RENDER_PARAM_INVALID, nullptr } };' + \"`r`n\" + ^
+               'mpv_render_context_create(&${1}, ${2}, params);'); ^
+           } ^
+           if($c -eq $orig){ Write-Host 'mpvqt: OpenGL render API patch did not apply (callsite differs).'; exit 1 } ^
+           Set-Content -Path $path -Value $c -Encoding UTF8; ^
+           Write-Host ('mpvqt: patched render backend in ' + $path);"
+    
         cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" -DCMAKE_CXX_FLAGS="-I\"%INCLUDE_DIR_FWD%\""
         ninja -C build install
         cd ..
+
+
     - name: Download & Stage VC++ Redist and OpenSSL
       shell: pwsh
       run: |
@@ -199,6 +241,23 @@ jobs:
     
           Set-Content -Path $main -Value $m -Encoding UTF8
         }
+
+        # 5b) Force Qt Quick RHI backend to D3D11 (DirectX) on Windows CI
+        # (CI patch) Ensure we are testing the intended backend.
+        $main = "src/main.cpp"
+        if (Test-Path $main) {
+          $m = Get-Content $main -Raw -Encoding UTF8
+          if ($m -notmatch 'QSG_RHI_BACKEND') {
+            $m = [regex]::Replace(
+              $m,
+              '(?m)^\s*preinitQt\(\);\s*$',
+              "preinitQt();$NL`qputenv(""QSG_RHI_BACKEND"", ""d3d11"");",
+              1
+            )
+            Set-Content -Path $main -Value $m -Encoding UTF8
+          }
+        }
+
     
         # 6) Remove qt.conf install + generation
         $filesToPatch = @(
@@ -233,150 +292,6 @@ jobs:
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
 
-        # 8) MpvVideoItem.cpp: stop forcing vo=libmpv (render context is not being set)
-        $mpvItem = "src/player/MpvVideoItem.cpp"
-        if (Test-Path $mpvItem) {
-          $t = Get-Content $mpvItem -Raw -Encoding UTF8
-          $orig = $t
-        
-          # 8a) Remove constructor-time vo=libmpv (supports Q_EMIT / QEMIT)
-          $t = [regex]::Replace(
-            $t,
-            '(?m)^\s*Q_?EMIT\s+setProperty\(\s*"vo"\s*,\s*"libmpv"\s*\)\s*;\s*$',
-            '    // (CI patch) Removed vo=libmpv (render context not available in this build).'
-          )
-        
-          # 8b) Remove any previously injected "Set/Delayed vo=libmpv" blocks (cleanup)
-          $t = [regex]::Replace(
-            $t,
-            '(?m)^\s*// \(CI patch\) Set vo=libmpv on ready.*\r?\n\s*Q_?EMIT\s+setProperty\(\s*"vo"\s*,\s*"libmpv"\s*\)\s*;\s*\r?\n',
-            ''
-          )
-          $t = [regex]::Replace(
-            $t,
-            '(?m)^\s*// \(CI patch\) Delayed vo=libmpv:.*\r?\n(?:\s*QTimer::singleShot\(.*\);\s*\r?\n){1,5}',
-            ''
-          )
-        
-          # 8c) Remove any leftover injected singleShot lines that set vo=libmpv (extra safety)
-          $t = [regex]::Replace(
-            $t,
-            '(?m)^\s*QTimer::singleShot\(\s*\d+\s*,\s*this\s*,\s*\[this\]\(\)\s*\{\s*Q_?EMIT\s+setProperty\(\s*"vo"\s*,\s*"libmpv"\s*\)\s*;\s*\}\s*\)\s*;\s*$',
-            ''
-          )
-        
-          # 8d) (Optional but recommended) explicitly force vo=null so mpv never attempts libmpv
-          if ($t -notmatch 'CI patch\)\s*Force vo=null') {
-            $t = [regex]::Replace(
-              $t,
-              '(?m)^(MpvVideoItem::MpvVideoItem\([^\)]*\)\s*:\s*MpvAbstractItem[^{]*\{\s*\r?\n)',
-              ('$1    // (CI patch) Force vo=null (avoid libmpv until render context is fixed).' + $NL +
-               '    Q_EMIT setProperty("vo", "null");' + $NL),
-              1
-            )
-          }
-        
-          # 8e) Remove QTimer include if it was only added by our old patch (optional cleanup)
-          # (Safe to leave it; no harm. Keeping it avoids fighting patches.)
-          # $t = [regex]::Replace($t, '(?m)^\s*#include\s+<QTimer>\s*\r?\n', '')
-        
-          if ($t -ne $orig) {
-            Set-Content -Path $mpvItem -Value $t -Encoding UTF8
-          } else {
-            Write-Host "MpvVideoItem.cpp: no changes (already patched?)"
-          }
-        }
- 
-
-    
-        # 9) PlayerComponent.cpp: pending queue + replay after initializeMpv (queued)
-        $pc = "src/player/PlayerComponent.cpp"
-        if (Test-Path $pc) {
-          $p = Get-Content $pc -Raw -Encoding UTF8
-          $origp = $p
-    
-          # 9a) Insert pending globals right after includes (robust anchor)
-          if ($p -notmatch 'CI patch\)\s*pending media globals') {
-            $globals = @(
-              ''
-              '// (CI patch) pending media globals (prevents dropped play request before mpv is ready)'
-              'static bool g_pendingLoad = false;'
-              'static QString g_pendingUrl;'
-              'static QVariantMap g_pendingOptions;'
-              'static QVariantMap g_pendingMetadata;'
-              'static QVariant g_pendingAudioStream;'
-              'static QVariant g_pendingSubtitleStream;'
-              ''
-            ) -join $NL
-    
-            $rxInc = [regex]'(?ms)\A(.*?(\r?\n))(?=\s*(static\s+void\s+wakeupcb|void\s+PlayerComponent::|PlayerComponent::PlayerComponent))'
-            $mInc = $rxInc.Match($p)
-            if ($mInc.Success) {
-              $p = $mInc.Groups[1].Value + $globals + $p.Substring($mInc.Groups[1].Length)
-            }
-          }
-    
-          # Ensure QTimer include exists
-          if ($p -notmatch '(?m)^\s*#include\s+<QTimer>\s*$') {
-            $p = [regex]::Replace(
-              $p,
-              '(?m)^(#include\s+<QRegularExpression>\s*\r?\n)',
-              ('$1#include <QTimer>' + $NL),
-              1
-            )
-          }
-    
-          # 9b) queueMedia(): if (!m_mpv) store pending request and return
-          if ($p -notmatch 'mpv not initialized yet; queueing request') {
-            $p = [regex]::Replace(
-              $p,
-              '(?s)(void\s+PlayerComponent::queueMedia\([^\)]*\)\s*\{.*?)(if\s*\(\s*!\s*m_mpv\s*\)\s*\{.*?return;\s*\})(\s*)',
-              {
-                param($mm)
-                $head = $mm.Groups[1].Value
-                $tailSpace = $mm.Groups[3].Value
-                $replacement = @(
-                  'if (!m_mpv) {'
-                  '  qWarning() << "PlayerComponent::queueMedia - mpv not initialized yet; queueing request";'
-                  '  g_pendingLoad = true;'
-                  '  g_pendingUrl = url;'
-                  '  g_pendingOptions = options;'
-                  '  g_pendingMetadata = metadata;'
-                  '  g_pendingAudioStream = audioStream;'
-                  '  g_pendingSubtitleStream = subtitleStream;'
-                  '  return;'
-                  '}'
-                ) -join $NL
-                return $head + $replacement + $tailSpace
-              },
-              1
-            )
-          }
-    
-          # 9c) After initializeMpv emits onMpvEvents(): replay pending request once (queued)
-          if ($p -notmatch 'CI patch\)\s*replay pending media') {
-            $p = [regex]::Replace(
-              $p,
-              '(?s)(void\s+PlayerComponent::initializeMpv\(\)\s*\{.*?emit\s+onMpvEvents\(\);\s*)',
-              ('$1' + $NL +
-               '  // (CI patch) replay pending media request now that mpv is ready' + $NL +
-               '  if (g_pendingLoad) {' + $NL +
-               '    g_pendingLoad = false;' + $NL +
-               '    const auto u = g_pendingUrl;' + $NL +
-               '    const auto o = g_pendingOptions;' + $NL +
-               '    const auto m = g_pendingMetadata;' + $NL +
-               '    const auto a = g_pendingAudioStream;' + $NL +
-               '    const auto s = g_pendingSubtitleStream;' + $NL +
-               '    QTimer::singleShot(0, this, [this, u, o, m, a, s]() { queueMedia(u, o, m, a, s); });' + $NL +
-               '  }' + $NL),
-              1
-            )
-          }
-    
-          if ($p -ne $origp) {
-            Set-Content -Path $pc -Value $p -Encoding UTF8
-          }
-        }
     
         # 10) Checks
         Write-Host "---- MpvVideoItem.cpp check ----"
