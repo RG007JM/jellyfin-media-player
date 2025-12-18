@@ -1,14 +1,17 @@
-name: Build Qt6.10 Windows x64 (DesktopGL + WebEngine ANGLE runtime)
+name: Build Qt 6.10 Windows x64 (DesktopGL + WebEngine + ANGLE runtime)
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - qt6
+    branches: [ qt6 ]
 
 jobs:
   build-win64:
     runs-on: windows-latest
+
+    env:
+      BUILD_TYPE: Release
+      ANGLE_OUT: angle-src/angle/out/Release
 
     steps:
     - uses: actions/checkout@v4
@@ -25,6 +28,7 @@ jobs:
     - name: Nuke MinGW and Path Contamination
       shell: pwsh
       run: |
+        $ErrorActionPreference = "Stop"
         $path = $env:Path -split ';' | Where-Object { $_ -notmatch 'mingw' -and $_ -notmatch 'strawberry' }
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
@@ -32,23 +36,20 @@ jobs:
     - name: Cache ANGLE checkout
       uses: actions/cache@v4
       with:
-        path: |
-          angle-src
+        path: angle-src
         key: angle-win64-${{ runner.os }}-${{ hashFiles('.github/workflows/**') }}
         restore-keys: |
           angle-win64-${{ runner.os }}-
-          
-    - name: Build ANGLE (from source, cached in workspace)
+
+    - name: Build ANGLE (self-contained runtime)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
         $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
 
-        # Put ANGLE client inside workspace so it can be cached
         $angleRoot = Join-Path $env:GITHUB_WORKSPACE "angle-src"
         New-Item -ItemType Directory -Force -Path $angleRoot | Out-Null
 
-        # depot_tools can stay in temp (small); caching it is optional
         $depot = Join-Path $env:RUNNER_TEMP "depot_tools"
         if (-not (Test-Path $depot)) {
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $depot
@@ -58,10 +59,9 @@ jobs:
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
 
-        # Force gclient root to avoid inheriting your repo's gclient state
+        # Keep gclient state local to the cached folder
         $env:GCLIENT_ROOT = $angleRoot
 
-        # Only fetch if not already present (so cache restores skip the huge download)
         $src = Join-Path $angleRoot "angle"
         if (-not (Test-Path $src)) {
           Push-Location $angleRoot
@@ -70,49 +70,30 @@ jobs:
         }
 
         Push-Location $src
-        gn gen out/Release --args="is_debug=false target_cpu=""x64"" is_component_build=true"
+        gn gen out/Release --args="is_debug=false target_cpu=""x64"" is_component_build=false"
         autoninja -C out/Release
         Pop-Location
 
-        New-Item -ItemType Directory -Force -Path "dep-install/bin" | Out-Null
-        Copy-Item -Force (Join-Path $src "out/Release/libEGL.dll")    "dep-install/bin/libEGL.dll"
-        Copy-Item -Force (Join-Path $src "out/Release/libGLESv2.dll") "dep-install/bin/libGLESv2.dll"
-
-    - name: Cache ANGLE checkout
-      uses: actions/cache@v4
-      with:
-        path: |
-          angle-src
-        key: angle-win64-${{ runner.os }}-${{ hashFiles('.github/workflows/**') }}
-        restore-keys: |
-          angle-win64-${{ runner.os }}-
-
-    - name: Prepare Libmpv (User Provided v3 URL)
+    - name: Stage ANGLE runtime DLLs (EGL/GLES + d3dcompiler)
       shell: pwsh
       run: |
-        New-Item -ItemType Directory -Force -Path "dep-install/bin", "dep-install/lib", "dep-install/include"
-        $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z"
-        Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 10
-        7z x mpv.7z -ompv
-        Set-Location mpv
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /exports libmpv-2.dll > exports.txt"
-        $defContent = @("LIBRARY libmpv-2.dll", "EXPORTS") + (Get-Content exports.txt | ForEach-Object { if ($_ -match "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)") { $matches[1] } })
-        $defContent | Set-Content libmpv-2.def
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
-        Copy-Item -Recurse -Force include\* ..\dep-install\include\
-        Copy-Item libmpv.lib ..\dep-install\lib\
-        Copy-Item libmpv-2.dll ..\dep-install\bin\
+        $ErrorActionPreference = "Stop"
+        $src = Join-Path $env:GITHUB_WORKSPACE "angle-src\angle"
+        $out = Join-Path $src "out\Release"
 
-    - name: Install Qt 6.10.1
-      id: qt
-      uses: jurplel/install-qt-action@v4
-      with:
-        version: "6.10.1"
-        target: "desktop"
-        arch: "win64_msvc2022_64"
-        modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning qtshadertools qtimageformats qtserialport"
+        New-Item -ItemType Directory -Force -Path "dep-install\bin" | Out-Null
 
-    - name: Setup Build Environment
+        Copy-Item -Force (Join-Path $out "libEGL.dll")    "dep-install\bin\libEGL.dll"
+        Copy-Item -Force (Join-Path $out "libGLESv2.dll") "dep-install\bin\libGLESv2.dll"
+
+        # ANGLE's Windows build copies d3dcompiler_47.dll from the Windows SDK redist. [web:10]
+        if (Test-Path (Join-Path $out "d3dcompiler_47.dll")) {
+          Copy-Item -Force (Join-Path $out "d3dcompiler_47.dll") "dep-install\bin\d3dcompiler_47.dll"
+        } else {
+          Write-Host "WARNING: d3dcompiler_47.dll not found in ANGLE output; build may still run if system provides it."
+        }
+
+    - name: Prepare folders + Ninja + reuse
       shell: cmd
       run: |
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
@@ -125,9 +106,36 @@ jobs:
         echo %GITHUB_WORKSPACE%\dep-install\bin>> %GITHUB_PATH%
         pip install reuse
 
+    - name: Prepare Libmpv (User Provided v3 URL)
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        New-Item -ItemType Directory -Force -Path "dep-install/bin", "dep-install/lib", "dep-install/include" | Out-Null
+        $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20240922-git-71f2220.7z"
+        Invoke-WebRequest -Uri $url -OutFile "mpv.7z" -UserAgent "curl/7.88.1" -MaximumRedirection 10
+        7z x mpv.7z -ompv
+        Set-Location mpv
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && dumpbin /exports libmpv-2.dll > exports.txt"
+        $defContent = @("LIBRARY libmpv-2.dll", "EXPORTS") + (Get-Content exports.txt | ForEach-Object { if ($_ -match "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)") { $matches[1] } })
+        $defContent | Set-Content libmpv-2.def
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && lib /def:libmpv-2.def /out:libmpv.lib /MACHINE:X64"
+        Copy-Item -Recurse -Force include\* ..\dep-install\include\
+        Copy-Item -Force libmpv.lib ..\dep-install\lib\
+        Copy-Item -Force libmpv-2.dll ..\dep-install\bin\
+
+    - name: Install Qt 6.10.1
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: "6.10.1"
+        target: "desktop"
+        arch: "win64_msvc2022_64"
+        modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning qtshadertools qtimageformats qtserialport"
+      # install-qt-action provides QT_ROOT_DIR to locate Qt. [web:21][web:23]
+
     - name: Prepare SDL2
       shell: pwsh
       run: |
+        $ErrorActionPreference = "Stop"
         Invoke-WebRequest -Uri "https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-VC.zip" -OutFile "sdl2.zip"
         Expand-Archive "sdl2.zip" -DestinationPath "sdl2-temp" -Force
         $root = (Get-ChildItem "sdl2-temp" | Select-Object -First 1).FullName
@@ -160,7 +168,8 @@ jobs:
     - name: Download & Stage VC++ Redist and OpenSSL
       shell: pwsh
       run: |
-        New-Item -ItemType Directory -Force -Path bundle/win
+        $ErrorActionPreference = "Stop"
+        New-Item -ItemType Directory -Force -Path bundle/win | Out-Null
         Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "bundle/win/vcredist_x64.exe"
         Invoke-WebRequest -Uri "https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-3.6.0.zip" -OutFile "openssl.zip"
         Expand-Archive "openssl.zip" -DestinationPath "openssl-temp" -Force
@@ -168,29 +177,10 @@ jobs:
         Copy-Item "$binPath\libssl-3-x64.dll" "dep-install\bin\"
         Copy-Item "$binPath\libcrypto-3-x64.dll" "dep-install\bin\"
 
-    - name: Download ANGLE runtime (libEGL/libGLESv2)
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = "Stop"
-        New-Item -ItemType Directory -Force -Path "dep-install/angle" | Out-Null
-
-        # NOTE: Qt6 MSVC packages do not include libEGL/libGLESv2 anymore; ship them yourself. [web:369][web:299]
-        # Replace this URL if needed with any ZIP containing libEGL.dll and libGLESv2.dll for Windows x64.
-        $url = "https://github.com/google/angle/releases/download/chromium/angle-win64.zip"
-        Invoke-WebRequest -Uri $url -OutFile "angle.zip" -MaximumRedirection 10
-        Expand-Archive "angle.zip" -DestinationPath "dep-install/angle" -Force
-
-        $egl = Get-ChildItem -Recurse "dep-install/angle" -Filter "libEGL.dll" | Select-Object -First 1
-        $gles = Get-ChildItem -Recurse "dep-install/angle" -Filter "libGLESv2.dll" | Select-Object -First 1
-        if (-not $egl) { throw "ANGLE package missing libEGL.dll" }
-        if (-not $gles) { throw "ANGLE package missing libGLESv2.dll" }
-
-        Copy-Item -Force $egl.FullName "dep-install/bin/libEGL.dll"
-        Copy-Item -Force $gles.FullName "dep-install/bin/libGLESv2.dll"
-
     - name: Patch WiX Bundle.wxs
       shell: pwsh
       run: |
+        $ErrorActionPreference = "Stop"
         $bundle  = "bundle/win/Bundle.wxs"
         if (Test-Path $bundle) {
           $c = Get-Content -Raw $bundle -Encoding UTF8
@@ -199,12 +189,11 @@ jobs:
           Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (DesktopGL + QSG diagnostics)
+    - name: Patch Source Code (force DesktopGL + QSG diagnostics)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
         $NL = [Environment]::NewLine
-
         $main = "src/main.cpp"
         if (Test-Path $main) {
           $m = Get-Content $main -Raw -Encoding UTF8
@@ -229,13 +218,13 @@ jobs:
             ('$0' + $inject),
             1
           )
-
           Set-Content -Path $main -Value $m -Encoding UTF8
         }
 
     - name: Build Jellyfin Desktop
       shell: pwsh
       run: |
+        $ErrorActionPreference = "Stop"
         $root = (Get-Location).Path.Replace("\", "/")
         $depInstall = "$root/dep-install"
         $libMpv = "$depInstall/lib/libmpv.lib"
@@ -257,10 +246,9 @@ jobs:
         ) -join "`r`n"
         Set-Content -Path $cmakeMod -Value $overrideContent -Encoding UTF8
 
-        $qtRootDir = $env:QT_ROOT_DIR
-        if (-not $qtRootDir) { throw "QT_ROOT_DIR is not set (install-qt-action env missing)" }
+        if (-not $env:QT_ROOT_DIR) { throw "QT_ROOT_DIR is not set (install-qt-action env missing)" }
 
-        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$qtRootDir`" -DMpvQt_DIR=`"$mpvQtDir`" ."
+        cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=`"$installPrefix`" -DCMAKE_PREFIX_PATH=`"$depInstall;$env:QT_ROOT_DIR`" -DMpvQt_DIR=`"$mpvQtDir`" ."
         if ($LASTEXITCODE -ne 0) { exit 1 }
 
         Set-Location build
@@ -269,19 +257,23 @@ jobs:
     - name: Deploy Qt and Finalize
       shell: pwsh
       run: |
-        $outDir = "$((Get-Location).Path)/output"
-        $depInstall = "$((Get-Location).Path)/dep-install"
+        $ErrorActionPreference = "Stop"
+        $outDir = "$((Get-Location).Path)\output"
+        $depInstall = "$((Get-Location).Path)\dep-install"
         if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
 
-        $qtRootDir = $env:QT_ROOT_DIR
-        $qtBin = Join-Path $qtRootDir "bin"
+        if (-not $env:QT_ROOT_DIR) { throw "QT_ROOT_DIR is not set (install-qt-action env missing)" }
+        $qtBin = Join-Path $env:QT_ROOT_DIR "bin"
 
         $processExe = Join-Path $qtBin "QtWebEngineProcess.exe"
         if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
 
-        Copy-Item -Force "$depInstall/bin/*.dll" $outDir
+        # Include ANGLE + other runtime DLLs staged in dep-install/bin
+        Copy-Item -Force "$depInstall\bin\*.dll" $outDir
 
         $exePath = Join-Path $outDir "Jellyfin Desktop.exe"
+
+        # windeployqt is the supported deploy tool on Windows. [web:25]
         & "windeployqt" --release --force --qmldir src/ui --compiler-runtime --xml "$exePath"
 
         $mpvConf = Join-Path $outDir "mpv.conf"
@@ -292,6 +284,7 @@ jobs:
     - name: Create Portable Zip
       shell: pwsh
       run: |
+        $ErrorActionPreference = "Stop"
         if (Test-Path "Jellyfin-Desktop-Portable.zip") { Remove-Item -Force "Jellyfin-Desktop-Portable.zip" }
         Compress-Archive -Path "output\*" -DestinationPath "Jellyfin-Desktop-Portable.zip"
 
