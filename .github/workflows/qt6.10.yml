@@ -40,20 +40,27 @@ jobs:
         path: |
           angle-src/angle
           angle-src/angle/out/Release
-        # Bump ANGLE_CACHE_VER to intentionally invalidate.
-        key: angle-win64-${{ runner.os }}-v1
+        key: angle-win64-${{ runner.os }}-angle-main-v1
+        restore-keys: |
+          angle-win64-${{ runner.os }}-angle-main-
 
-    - name: Fetch + Build ANGLE (only on cache miss)
-      if: steps.angle-cache.outputs.cache-hit != 'true'
+    - name: Fetch + Build ANGLE (isolated gclient root)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
         $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
 
         $angleRoot = Join-Path $env:GITHUB_WORKSPACE "angle-src"
+        $src = Join-Path $angleRoot "angle"
+
+        # Always ensure the gclient root is clean and cannot inherit other repo state
         New-Item -ItemType Directory -Force -Path $angleRoot | Out-Null
 
-        # depot_tools (small; keep in RUNNER_TEMP)
+        # IMPORTANT: gclient uses _bad_scm as a quarantine; if it exists from a prior failure, nuke it
+        $bad = Join-Path $angleRoot "_bad_scm"
+        if (Test-Path $bad) { Remove-Item -Recurse -Force $bad }
+
+        # depot_tools
         $depot = Join-Path $env:RUNNER_TEMP "depot_tools"
         if (-not (Test-Path $depot)) {
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $depot
@@ -63,25 +70,35 @@ jobs:
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
 
-        # IMPORTANT: keep gclient state inside angleRoot (not your repo root)
-        $env:GCLIENT_ROOT = $angleRoot
+        # Force gclient to treat angleRoot as root (prevents it operating in angle-src/. as a solution)
+        Push-Location $angleRoot
 
-        $src = Join-Path $angleRoot "angle"
+        # Recreate .gclient every run so no stale solution/revision overrides can survive
+        @'
+        solutions = [
+          {
+            "name": "angle",
+            "url": "https://chromium.googlesource.com/angle/angle.git",
+            "deps_file": "DEPS",
+            "managed": False,
+            "custom_vars": {},
+          },
+        ]
+        '@ | Set-Content -Encoding ASCII (Join-Path $angleRoot ".gclient")
 
-        # If cache restored a broken/partial dir, wipe it (prevents _bad_scm loops)
-        if (Test-Path $angleRoot) {
+        # If cache restored a non-git dir, wipe it; avoids gclient quarantine loops
+        if (Test-Path $src) {
           if (-not (Test-Path (Join-Path $src ".git"))) {
-            Remove-Item -Recurse -Force $angleRoot
-            New-Item -ItemType Directory -Force -Path $angleRoot | Out-Null
+            Remove-Item -Recurse -Force $src
           }
         }
 
-        if (-not (Test-Path $src)) {
-          Push-Location $angleRoot
-          fetch angle
-          Pop-Location
-        }
+        # Sync dependencies (fast after first run due to cache + CIPD reuse)
+        cmd.exe /c "gclient sync --nohooks"
 
+        Pop-Location
+
+        # Build (skip if out/Release already present + up-to-date; Ninja handles this)
         Push-Location $src
         gn gen out/Release --args="is_debug=false target_cpu=""x64"" is_component_build=false"
         autoninja -C out/Release
@@ -91,19 +108,15 @@ jobs:
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
-        $src = Join-Path $env:GITHUB_WORKSPACE "angle-src\angle"
-        $out = Join-Path $src "out\Release"
+        $out = Join-Path $env:GITHUB_WORKSPACE "angle-src\angle\out\Release"
 
         New-Item -ItemType Directory -Force -Path "dep-install\bin" | Out-Null
-
         Copy-Item -Force (Join-Path $out "libEGL.dll")    "dep-install\bin\libEGL.dll"
         Copy-Item -Force (Join-Path $out "libGLESv2.dll") "dep-install\bin\libGLESv2.dll"
 
-        # ANGLE build files copy d3dcompiler_47.dll from the Windows SDK redist. [web:10]
+        # gclient/ANGLE toolchain commonly stages this; keep if present. [web:44]
         if (Test-Path (Join-Path $out "d3dcompiler_47.dll")) {
           Copy-Item -Force (Join-Path $out "d3dcompiler_47.dll") "dep-install\bin\d3dcompiler_47.dll"
-        } else {
-          Write-Host "WARNING: d3dcompiler_47.dll not found in ANGLE output; may rely on system-provided copy."
         }
 
     - name: Prepare folders + Ninja + reuse
