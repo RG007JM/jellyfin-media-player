@@ -56,11 +56,9 @@ jobs:
 
         New-Item -ItemType Directory -Force -Path $angleRoot | Out-Null
 
-        # If a previous failed gclient run left quarantine dirs, remove them
         $bad = Join-Path $angleRoot "_bad_scm"
         if (Test-Path $bad) { Remove-Item -Recurse -Force $bad }
 
-        # depot_tools
         $depot = Join-Path $env:RUNNER_TEMP "depot_tools"
         if (-not (Test-Path $depot)) {
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $depot
@@ -70,7 +68,6 @@ jobs:
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
 
-        # gclient root (force deterministic config each run)
         Push-Location $angleRoot
 
         $gclientSpec = @(
@@ -87,19 +84,18 @@ jobs:
         ) -join $NL
         Set-Content -Encoding ASCII -Path (Join-Path $angleRoot ".gclient") -Value $gclientSpec
 
-        # If cache restored something weird, wipe it
         if (Test-Path $src) {
           if (-not (Test-Path (Join-Path $src ".git"))) {
             Remove-Item -Recurse -Force $src
           }
         }
 
-        cmd.exe /c "gclient sync --nohooks"
+        # IMPORTANT: do NOT use --nohooks (hooks generate toolchain files incl. rust-toolchain/VERSION). [web:311]
+        cmd.exe /c "gclient sync"
         Pop-Location
 
         if (-not (Test-Path $src)) { throw "ANGLE checkout missing at $src after gclient sync" }
 
-        # Build args via args.gn (constructed like your $inject to avoid whitespace/quoting issues)
         Push-Location $src
         New-Item -ItemType Directory -Force -Path "out/Release" | Out-Null
 
@@ -107,12 +103,15 @@ jobs:
           'is_debug=false'
           'target_cpu="x64"'
           'is_component_build=false'
+          # Optional: if you do not need any Rust bits, you can try disabling Rust to avoid toolchain churn:
+          # 'enable_rust=false'
         ) -join $NL
         Set-Content -Encoding ASCII -Path "out/Release/args.gn" -Value $gnArgs
 
         gn gen out/Release
         autoninja -C out/Release
         Pop-Location
+
 
     - name: Stage ANGLE runtime DLLs (EGL/GLES + d3dcompiler)
       shell: pwsh
