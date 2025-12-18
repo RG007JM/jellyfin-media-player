@@ -104,6 +104,7 @@ jobs:
         $binPath = (Get-ChildItem -Path "openssl-temp" -Recurse -Filter "libssl-3-x64.dll" | Select-Object -First 1).DirectoryName
         Copy-Item "$binPath\libssl-3-x64.dll" "dep-install\bin\"
         Copy-Item "$binPath\libcrypto-3-x64.dll" "dep-install\bin\"
+        
     - name: Patch WiX Bundle.wxs
       shell: pwsh
       run: |
@@ -114,121 +115,38 @@ jobs:
           $c = [regex]::Replace($c, 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe', 'vcredist_x64.exe')
           Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
-    - name: Patch Source Code (Qt6 + libmpv fix + titlebar)
+        
+    - name: Patch sources (libmpv ready + titlebar + pending queue)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
         $NL = [Environment]::NewLine
     
-        # ----------------------------
-        # 0) Helpers
-        # ----------------------------
-        function Write-Section($t) { Write-Host ""; Write-Host "===== $t ====="; }
-    
-        # ----------------------------
-        # 1) Patch src/CMakeLists.txt (strip optional components)
-        # ----------------------------
-        Write-Section "Patch src/CMakeLists.txt"
-        $cmakeFile = "src/CMakeLists.txt"
-        if (Test-Path $cmakeFile) {
-          $content = Get-Content $cmakeFile -Raw -Encoding UTF8
-          $content = [regex]::Replace($content, '(?mi)^.*mpris.*$', '')
-          $content = [regex]::Replace($content, '(?mi)^.*taskbar.*$', '')
-          $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
-          Set-Content -Path $cmakeFile -Value $content -Encoding UTF8
-        }
-    
-        # ----------------------------
-        # 2) Patch src/core/ComponentManager.cpp
-        # ----------------------------
-        Write-Section "Patch src/core/ComponentManager.cpp"
-        $compMgr = "src/core/ComponentManager.cpp"
-        if (Test-Path $compMgr) {
-          $compContent = Get-Content $compMgr -Raw -Encoding UTF8
-          $compContent = [regex]::Replace($compContent, '(?mi)^\s*#include\s+.*MprisComponent\.h.*$', '')
-          $compContent = [regex]::Replace($compContent, '(?mi)^\s*#include\s+.*TaskbarComponent\.h.*$', '')
-          $compContent = [regex]::Replace($compContent, '(?mi)^.*MprisComponent.*$', '')
-          $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
-          Set-Content -Path $compMgr -Value $compContent -Encoding UTF8
-        }
-    
-        # ----------------------------
-        # 3) Patch src/ui/WindowManager.cpp
-        # ----------------------------
-        Write-Section "Patch src/ui/WindowManager.cpp"
-        $winMgr = "src/ui/WindowManager.cpp"
-        if (Test-Path $winMgr) {
-          $winContent = Get-Content $winMgr -Raw -Encoding UTF8
-          $winContent = [regex]::Replace($winContent, '(?mi)^.*TaskbarComponent.*$', '')
-          Set-Content -Path $winMgr -Value $winContent -Encoding UTF8
-        }
-    
-        # ----------------------------
-        # 4) CodecsComponent.cpp: ensure windows.h is included (idempotent)
-        # ----------------------------
-        Write-Section "Patch src/player/CodecsComponent.cpp (windows.h)"
-        $codecs = "src/player/CodecsComponent.cpp"
-        if (Test-Path $codecs) {
-          $c = Get-Content $codecs -Raw -Encoding UTF8
-          if ($c -notmatch '(?m)^\s*#include\s+<windows\.h>') {
-            $c = "#include <windows.h>$NL$c"
-            Set-Content -Path $codecs -Value $c -Encoding UTF8
+        function Patch-File([string]$path, [scriptblock]$mutator) {
+          if (-not (Test-Path $path)) { Write-Host "Skip missing $path"; return }
+          $t = Get-Content $path -Raw -Encoding UTF8
+          $o = $t
+          $t = & $mutator $t
+          if ($t -ne $o) {
+            Set-Content -Path $path -Value $t -Encoding UTF8
+            Write-Host "Patched $path"
+          } else {
+            Write-Host "No changes $path"
           }
         }
     
-        # ----------------------------
-        # 5) main.cpp: NO forced graphics backend + titlebar nudge
-        # ----------------------------
-        Write-Section "Patch src/main.cpp (no forced backend + titlebar)"
-        $main = "src/main.cpp"
-        if (Test-Path $main) {
-          $m = Get-Content $main -Raw -Encoding UTF8
-          $orig = $m
+        # --- main.cpp: remove forced graphics API + titlebar nudge ---
+        Patch-File "src/main.cpp" {
+          param($m)
     
-          # Ensure QTimer include exists (for titlebar nudge)
-          if ($m -notmatch '(?m)^\s*#include\s+<QTimer>') {
-            $m = "#include <QTimer>$NL$m"
-          }
+          if ($m -notmatch '(?m)^\s*#include\s+<QTimer>') { $m = "#include <QTimer>$NL$m" }
     
-          # Remove forced Qt Quick graphics API
-          $m = [regex]::Replace(
-            $m,
-            '^[ \t]*QQuickWindow::setGraphicsApi\(\s*QSGRendererInterface::OpenGL\s*\)\s*;\s*\r?\n',
-            '',
-            [System.Text.RegularExpressions.RegexOptions]::Multiline
-          )
+          $m = [regex]::Replace($m, '^[ \t]*QQuickWindow::setGraphicsApi\(\s*QSGRendererInterface::OpenGL\s*\)\s*;\s*\r?\n', '', 'Multiline')
+          $m = [regex]::Replace($m, '^[ \t]*QCoreApplication::setAttribute\(\s*Qt::AA_ShareOpenGLContexts\s*\)\s*;\s*\r?\n', '', 'Multiline')
+          $m = [regex]::Replace($m, '(?s)\r?\n\s*static\s+void\s+forceCompatOpenGL\s*\(\s*\)\s*\{.*?\}\s*\r?\n', "$NL", 'Singleline')
+          $m = [regex]::Replace($m, '^[ \t]*forceCompatOpenGL\(\);\s*\r?\n', '', 'Multiline')
+          $m = [regex]::Replace($m, '^[ \t]*qputenv\(\s*"QSG_RHI_BACKEND"\s*,\s*".*?"\s*\)\s*;\s*\r?\n', '', 'Multiline')
     
-          # Remove forced shared GL contexts
-          $m = [regex]::Replace(
-            $m,
-            '^[ \t]*QCoreApplication::setAttribute\(\s*Qt::AA_ShareOpenGLContexts\s*\)\s*;\s*\r?\n',
-            '',
-            [System.Text.RegularExpressions.RegexOptions]::Multiline
-          )
-    
-          # Remove any old injected helper/call (from previous workflow revisions)
-          $m = [regex]::Replace(
-            $m,
-            '(?s)\r?\n\s*static\s+void\s+forceCompatOpenGL\s*\(\s*\)\s*\{.*?\}\s*\r?\n',
-            "$NL",
-            [System.Text.RegularExpressions.RegexOptions]::Singleline
-          )
-          $m = [regex]::Replace(
-            $m,
-            '^[ \t]*forceCompatOpenGL\(\);\s*\r?\n',
-            '',
-            [System.Text.RegularExpressions.RegexOptions]::Multiline
-          )
-    
-          # Remove any injected QSG_RHI_BACKEND forcing
-          $m = [regex]::Replace(
-            $m,
-            '^[ \t]*qputenv\(\s*"QSG_RHI_BACKEND"\s*,\s*".*?"\s*\)\s*;\s*\r?\n',
-            '',
-            [System.Text.RegularExpressions.RegexOptions]::Multiline
-          )
-    
-          # Windows title bar not visible until resize: one-time nudge after setFlags()
           if ($m -notmatch 'CI patch\)\s*Work around Windows title bar not painting') {
             $m2 = [regex]::Replace(
               $m,
@@ -245,43 +163,27 @@ jobs:
                '#endif' + $NL),
               1
             )
-    
-            if ($m2 -ne $m) { $m = $m2 } else { Write-Host "Titlebar patch anchor not found; continuing." }
+            if ($m2 -ne $m) { $m = $m2 } else { Write-Host "Titlebar anchor not found; skipped." }
           }
     
-          # Optional cleanup if earlier workflow injected these includes
-          $m = [regex]::Replace($m, '(?m)^\s*#include\s+<QSurfaceFormat>\s*\r?\n', '')
-          $m = [regex]::Replace($m, '(?m)^\s*#include\s+<QCoreApplication>\s*\r?\n', '')
-    
-          if ($m -ne $orig) {
-            Set-Content -Path $main -Value $m -Encoding UTF8
-          }
-    
-          Write-Host "---- VERIFY main.cpp ----"
-          Select-String -Path "src/main.cpp" -SimpleMatch -Pattern "setGraphicsApi", "AA_ShareOpenGLContexts", "QSG_RHI_BACKEND", "forceCompatOpenGL", "title bar not painting" |
-            ForEach-Object { Write-Host $_.Line }
-          Write-Host "-------------------------"
+          $m
         }
     
-        # ----------------------------
-        # 6) Fix libmpv render-context timing (keep embedded video)
-        #    - defer vo=libmpv until MpvVideoItem::ready
-        #    - queue early play requests until mpv is ready
-        # ----------------------------
-        Write-Section "Patch src/player/MpvVideoItem.cpp (defer vo=libmpv)"
-        $mpvItem = "src/player/MpvVideoItem.cpp"
-        if (Test-Path $mpvItem) {
-          $t = Get-Content $mpvItem -Raw -Encoding UTF8
-          $orig = $t
+        Write-Host "---- main.cpp verify ----"
+        Select-String -Path "src/main.cpp" -SimpleMatch -Pattern "setGraphicsApi", "AA_ShareOpenGLContexts", "QSG_RHI_BACKEND", "forceCompatOpenGL", "title bar not painting" |
+          ForEach-Object { Write-Host $_.Line }
+        Write-Host "-------------------------"
     
-          # Remove constructor-time forcing
+        # --- MpvVideoItem.cpp: defer vo=libmpv until ready ---
+        Patch-File "src/player/MpvVideoItem.cpp" {
+          param($t)
+    
           $t = [regex]::Replace(
             $t,
             '(?m)^\s*QEMIT\s+setProperty\(\s*"vo"\s*,\s*"libmpv"\s*\)\s*;\s*$',
             '    // (CI patch) Do not set vo=libmpv in constructor; wait for MpvAbstractItem::ready.'
           )
     
-          # Insert forcing right before initializeMpv path (before setMpvController call)
           if ($t -notmatch 'CI patch\)\s*Set vo=libmpv on ready') {
             $t2 = [regex]::Replace(
               $t,
@@ -294,46 +196,88 @@ jobs:
             $t = $t2
           }
     
-          if ($t -ne $orig) {
-            Set-Content -Path $mpvItem -Value $t -Encoding UTF8
-          }
-    
-          Write-Host "---- VERIFY MpvVideoItem.cpp ----"
-          Select-String -Path $mpvItem -SimpleMatch -Pattern 'setProperty("vo", "libmpv")','CI patch' | ForEach-Object { Write-Host $_.Line }
-          Write-Host "--------------------------------"
+          $t
         }
     
-        Write-Section "Patch src/player/PlayerComponent.cpp (pending play until ready)"
-        $pc = "src/player/PlayerComponent.cpp"
-        if (Test-Path $pc) {
-          $p = Get-Content $pc -Raw -Encoding UTF8
-          $origp = $p
+        Write-Host "---- MpvVideoItem.cpp verify ----"
+        Select-String -Path "src/player/MpvVideoItem.cpp" -SimpleMatch -Pattern 'setProperty("vo", "libmpv")','CI patch' |
+          ForEach-Object { Write-Host $_.Line }
+        Write-Host "--------------------------------"
     
-          # Add pending variables once near the first static function (wakeupcb)
+        # --- PlayerComponent.cpp: keep pending play request until mpv is ready ---
+        Patch-File "src/player/PlayerComponent.cpp" {
+          param($p)
+    
+          # Insert pending globals near static wakeupcb
           if ($p -notmatch 'CI patch\)\s*pending media when mpv isn''t ready') {
             $m = [regex]::Match($p, '(?m)^\s*static\s+void\s+wakeupcb')
             if ($m.Success) {
               $idx = $m.Index
-              $p = $p.Substring(0, $idx) + @"
-               // (CI patch) pending media when mpv isn't ready yet (prevents dropped play request)
-               static bool g_pendingLoad = false;
-               static QString g_pendingUrl;
-               static QVariantMap g_pendingOptions;
-               static QVariantMap g_pendingMetadata;
-               static QVariant g_pendingAudioStream;
-               static QVariant g_pendingSubtitleStream;
-              
-              "@ + $p.Substring($idx)
-            } else {
-              Write-Host "Could not find wakeupcb anchor in PlayerComponent.cpp; skipping pending queue patch."
+              $ins = @(
+                ' // (CI patch) pending media when mpv isn''t ready yet (prevents dropped play request)'
+                ' static bool g_pendingLoad = false;'
+                ' static QString g_pendingUrl;'
+                ' static QVariantMap g_pendingOptions;'
+                ' static QVariantMap g_pendingMetadata;'
+                ' static QVariant g_pendingAudioStream;'
+                ' static QVariant g_pendingSubtitleStream;'
+                ''
+              ) -join $NL
+              $p = $p.Substring(0, $idx) + $ins + $p.Substring($idx)
             }
           }
     
-          # Patch queueMedia(): if (!m_mpv) store & return (instead of dropping)
+          # Replace the early-return block in queueMedia
           if ($p -notmatch 'queueing request') {
             $p = [regex]::Replace(
               $p,
-              '(
+              '(?s)void\s+PlayerComponent::queueMedia\([^\)]*\)\s*\{.*?if\s*\(\s*!\s*m_mpv\s*\)\s*\{.*?return;\s*\}',
+              {
+                param($mm)
+                $block = $mm.Value
+                $block = [regex]::Replace(
+                  $block,
+                  '(?s)if\s*\(\s*!\s*m_mpv\s*\)\s*\{.*?return;\s*\}',
+                  ('if (!m_mpv) {' + $NL +
+                   '  qWarning() << "PlayerComponent::queueMedia - mpv not initialized yet; queueing request";' + $NL +
+                   '  g_pendingLoad = true;' + $NL +
+                   '  g_pendingUrl = url;' + $NL +
+                   '  g_pendingOptions = options;' + $NL +
+                   '  g_pendingMetadata = metadata;' + $NL +
+                   '  g_pendingAudioStream = audioStream;' + $NL +
+                   '  g_pendingSubtitleStream = subtitleStream;' + $NL +
+                   '  return;' + $NL +
+                   '}')
+                )
+                $block
+              },
+              1
+            )
+          }
+    
+          # After emit onMpvEvents(); inside initializeMpv(), replay if pending
+          if ($p -notmatch 'CI patch\)\s*replay pending media') {
+            $p = [regex]::Replace(
+              $p,
+              '(?s)(void\s+PlayerComponent::initializeMpv\(\)\s*\{.*?emit\s+onMpvEvents\(\);\s*)',
+              ('$1' + $NL +
+               '  // (CI patch) replay pending media request now that mpv is ready' + $NL +
+               '  if (g_pendingLoad) {' + $NL +
+               '    g_pendingLoad = false;' + $NL +
+               '    queueMedia(g_pendingUrl, g_pendingOptions, g_pendingMetadata, g_pendingAudioStream, g_pendingSubtitleStream);' + $NL +
+               '  }' + $NL),
+              1
+            )
+          }
+    
+          $p
+        }
+    
+        Write-Host "---- PlayerComponent.cpp verify ----"
+        Select-String -Path "src/player/PlayerComponent.cpp" -SimpleMatch -Pattern "queueing request", "replay pending media" |
+          ForEach-Object { Write-Host $_.Line }
+        Write-Host "-----------------------------------"
+    
 
 
     - name: Build Jellyfin Desktop
