@@ -53,14 +53,11 @@ jobs:
         $angleRoot = Join-Path $env:GITHUB_WORKSPACE "angle-src"
         $src = Join-Path $angleRoot "angle"
 
-        # Always ensure the gclient root is clean and cannot inherit other repo state
         New-Item -ItemType Directory -Force -Path $angleRoot | Out-Null
 
-        # IMPORTANT: gclient uses _bad_scm as a quarantine; if it exists from a prior failure, nuke it
         $bad = Join-Path $angleRoot "_bad_scm"
         if (Test-Path $bad) { Remove-Item -Recurse -Force $bad }
 
-        # depot_tools
         $depot = Join-Path $env:RUNNER_TEMP "depot_tools"
         if (-not (Test-Path $depot)) {
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $depot
@@ -70,10 +67,8 @@ jobs:
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
 
-        # Force gclient to treat angleRoot as root (prevents it operating in angle-src/. as a solution)
         Push-Location $angleRoot
 
-        # Recreate .gclient every run so no stale solution/revision overrides can survive
         @'
         solutions = [
           {
@@ -86,21 +81,19 @@ jobs:
         ]
         '@ | Set-Content -Encoding ASCII (Join-Path $angleRoot ".gclient")
 
-        # If cache restored a non-git dir, wipe it; avoids gclient quarantine loops
         if (Test-Path $src) {
           if (-not (Test-Path (Join-Path $src ".git"))) {
             Remove-Item -Recurse -Force $src
           }
         }
 
-        # Sync dependencies (fast after first run due to cache + CIPD reuse)
         cmd.exe /c "gclient sync --nohooks"
-
         Pop-Location
 
-        # Build (skip if out/Release already present + up-to-date; Ninja handles this)
+        if (-not (Test-Path $src)) { throw "ANGLE checkout missing at $src after gclient sync" }
+
         Push-Location $src
-        gn gen out/Release --args="is_debug=false target_cpu=""x64"" is_component_build=false"
+        gn gen out/Release --args='is_debug=false target_cpu="x64" is_component_build=false'
         autoninja -C out/Release
         Pop-Location
 
