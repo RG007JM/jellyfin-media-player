@@ -311,55 +311,70 @@ jobs:
         if (Test-Path $pc) {
           $p = Get-Content $pc -Raw -Encoding UTF8
           $origp = $p
-    
-          # Insert pending globals near wakeupcb
-          if ($p -notmatch 'CI patch\)\s*pending media when mpv isn''t ready') {
-            $m2 = [regex]::Match($p, '(?m)^\s*static\s+void\s+wakeupcb')
-            if ($m2.Success) {
-              $idx = $m2.Index
-              $ins = @(
-                ' // (CI patch) pending media when mpv isn''t ready yet (prevents dropped play request)'
-                ' static bool g_pendingLoad = false;'
-                ' static QString g_pendingUrl;'
-                ' static QVariantMap g_pendingOptions;'
-                ' static QVariantMap g_pendingMetadata;'
-                ' static QVariant g_pendingAudioStream;'
-                ' static QVariant g_pendingSubtitleStream;'
-                ''
-              ) -join $NL
-              $p = $p.Substring(0, $idx) + $ins + $p.Substring($idx)
+        
+          # 9a) Insert pending globals right after includes (robust anchor)
+          if ($p -notmatch 'CI patch\)\s*pending media globals') {
+            $globals = @(
+              ''
+              '// (CI patch) pending media globals (prevents dropped play request before mpv is ready)'
+              'static bool g_pendingLoad = false;'
+              'static QString g_pendingUrl;'
+              'static QVariantMap g_pendingOptions;'
+              'static QVariantMap g_pendingMetadata;'
+              'static QVariant g_pendingAudioStream;'
+              'static QVariant g_pendingSubtitleStream;'
+              ''
+            ) -join $NL
+        
+            # Insert after the last #include line in the file
+            $rxInc = [regex]'(?ms)\A(.*?(\r?\n))(?=\s*(static\s+void\s+wakeupcb|void\s+PlayerComponent::|PlayerComponent::PlayerComponent))'
+            $mInc = $rxInc.Match($p)
+            if ($mInc.Success) {
+              $p = $mInc.Groups[1].Value + $globals + $p.Substring($mInc.Groups[1].Length)
+            } else {
+              # Fallback: insert after the last include directive
+              $lines = $p -split "\r?\n", 0, "RegexMatch"
+              $lastInc = -1
+              for ($i=0; $i -lt $lines.Length; $i++) {
+                if ($lines[$i] -match '^\s*#include\b') { $lastInc = $i }
+              }
+              if ($lastInc -ge 0) {
+                $lines = $lines[0..$lastInc] + $globals + $lines[($lastInc+1)..($lines.Length-1)]
+                $p = ($lines -join $NL)
+              } else {
+                Write-Host "PlayerComponent.cpp: no include anchor found; skipping globals insert"
+              }
             }
           }
-    
-          # Modify the early-return in queueMedia to store pending request
+        
+          # 9b) Modify queueMedia(): if (!m_mpv) store pending request and return
           if ($p -notmatch 'queueing request') {
             $p = [regex]::Replace(
               $p,
-              '(?s)void\s+PlayerComponent::queueMedia\([^\)]*\)\s*\{.*?if\s*\(\s*!\s*m_mpv\s*\)\s*\{.*?return;\s*\}',
+              '(?s)(void\s+PlayerComponent::queueMedia\([^\)]*\)\s*\{.*?)(if\s*\(\s*!\s*m_mpv\s*\)\s*\{.*?return;\s*\})(\s*)',
               {
                 param($mm)
-                $block = $mm.Value
-                $block = [regex]::Replace(
-                  $block,
-                  '(?s)if\s*\(\s*!\s*m_mpv\s*\)\s*\{.*?return;\s*\}',
-                  ('if (!m_mpv) {' + $NL +
-                   '  qWarning() << "PlayerComponent::queueMedia - mpv not initialized yet; queueing request";' + $NL +
-                   '  g_pendingLoad = true;' + $NL +
-                   '  g_pendingUrl = url;' + $NL +
-                   '  g_pendingOptions = options;' + $NL +
-                   '  g_pendingMetadata = metadata;' + $NL +
-                   '  g_pendingAudioStream = audioStream;' + $NL +
-                   '  g_pendingSubtitleStream = subtitleStream;' + $NL +
-                   '  return;' + $NL +
-                   '}')
-                )
-                $block
+                $head = $mm.Groups[1].Value
+                $tailSpace = $mm.Groups[3].Value
+                $replacement = @(
+                  'if (!m_mpv) {'
+                  '  qWarning() << "PlayerComponent::queueMedia - mpv not initialized yet; queueing request";'
+                  '  g_pendingLoad = true;'
+                  '  g_pendingUrl = url;'
+                  '  g_pendingOptions = options;'
+                  '  g_pendingMetadata = metadata;'
+                  '  g_pendingAudioStream = audioStream;'
+                  '  g_pendingSubtitleStream = subtitleStream;'
+                  '  return;'
+                  '}'
+                ) -join $NL
+                return $head + $replacement + $tailSpace
               },
               1
             )
           }
-    
-          # Replay pending request after initializeMpv has emitted onMpvEvents()
+        
+          # 9c) After initializeMpv emits onMpvEvents(): replay pending request once
           if ($p -notmatch 'CI patch\)\s*replay pending media') {
             $p = [regex]::Replace(
               $p,
@@ -373,12 +388,17 @@ jobs:
               1
             )
           }
-    
+        
           if ($p -ne $origp) {
             Set-Content -Path $pc -Value $p -Encoding UTF8
           }
+        
+          Write-Host "---- PlayerComponent.cpp check ----"
+          Select-String -Path $pc -SimpleMatch -Pattern "pending media globals", "queueing request", "replay pending media" |
+            ForEach-Object { Write-Host $_.Line }
+          Write-Host "-----------------------------------"
         }
-    
+
         # 10) Checks
         Write-Host "---- main.cpp forced API check ----"
         Select-String -Path "src/main.cpp" -Pattern "setGraphicsApi","QSG_RHI_BACKEND","AA_ShareOpenGLContexts","forceCompatOpenGL" -SimpleMatch -List | ForEach-Object { $_.Line }
