@@ -34,38 +34,42 @@ jobs:
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
-
-        # ANGLE uses Chromium depot_tools (gn + autoninja). [web:391]
         $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
 
-        # Put depot_tools on PATH
+        # Clone depot_tools and initialize it (fixes python3_bin_reldir.txt missing). [web:391]
         if (-not (Test-Path "depot_tools")) {
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
         }
         $env:Path = "$(Resolve-Path depot_tools);$env:Path"
 
-        # Fetch ANGLE source
+        Push-Location depot_tools
+        # Initializes/updates depot_tools bootstrap (python, etc). [web:391]
+        cmd.exe /c "update_depot_tools.bat"
+        Pop-Location
+
+        # Fetch ANGLE
         if (-not (Test-Path "angle")) {
           git clone https://chromium.googlesource.com/angle/angle.git angle
         }
 
         Push-Location angle
 
-        # Generate build files and build Release (x64)
-        # "is_component_build=true" produces the DLLs we need (libEGL/libGLESv2). [web:391]
+        # Build Release x64 shared libs
         gn gen out/Release --args="is_debug=false target_cpu=""x64"" is_component_build=true"
         autoninja -C out/Release
 
-        $egl  = Join-Path (Get-Location) "out/Release/libEGL.dll"
-        $gles = Join-Path (Get-Location) "out/Release/libGLESv2.dll"
-        if (-not (Test-Path $egl))  { throw "ANGLE build did not produce libEGL.dll at $egl" }
-        if (-not (Test-Path $gles)) { throw "ANGLE build did not produce libGLESv2.dll at $gles" }
+        # Don’t assume exact output path; locate the DLLs
+        $egl  = Get-ChildItem -Recurse "out/Release" -Filter "libEGL.dll"   | Select-Object -First 1
+        $gles = Get-ChildItem -Recurse "out/Release" -Filter "libGLESv2.dll"| Select-Object -First 1
+        if (-not $egl)  { throw "ANGLE build did not produce libEGL.dll under out/Release" }
+        if (-not $gles) { throw "ANGLE build did not produce libGLESv2.dll under out/Release" }
 
         Pop-Location
 
         New-Item -ItemType Directory -Force -Path "dep-install/bin" | Out-Null
-        Copy-Item -Force $egl  "dep-install/bin/libEGL.dll"
-        Copy-Item -Force $gles "dep-install/bin/libGLESv2.dll"
+        Copy-Item -Force $egl.FullName  "dep-install/bin/libEGL.dll"
+        Copy-Item -Force $gles.FullName "dep-install/bin/libGLESv2.dll"
+
 
     - name: Prepare Libmpv (User Provided v3 URL)
       shell: pwsh
