@@ -232,56 +232,62 @@ jobs:
         # 7) Remove qt.conf files from repo tree
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
-    
-        # 8) MpvVideoItem.cpp: do NOT set vo=libmpv in ctor; set it slightly later than ready using QTimer
+
+        # 8) MpvVideoItem.cpp: stop forcing vo=libmpv (render context is not being set)
         $mpvItem = "src/player/MpvVideoItem.cpp"
         if (Test-Path $mpvItem) {
           $t = Get-Content $mpvItem -Raw -Encoding UTF8
           $orig = $t
-    
+        
           # 8a) Remove constructor-time vo=libmpv (supports Q_EMIT / QEMIT)
           $t = [regex]::Replace(
             $t,
             '(?m)^\s*Q_?EMIT\s+setProperty\(\s*"vo"\s*,\s*"libmpv"\s*\)\s*;\s*$',
-            '    // (CI patch) Do not set vo=libmpv in constructor; wait until the item is truly renderable.'
+            '    // (CI patch) Removed vo=libmpv (render context not available in this build).'
           )
-    
-          # 8b) Ensure QTimer include exists
-          if ($t -notmatch '(?m)^\s*#include\s+<QTimer>\s*$') {
-            $t = [regex]::Replace(
-              $t,
-              '(?m)^(#include\s+<QDebug>\s*\r?\n)',
-              ('$1#include <QTimer>' + $NL),
-              1
-            )
-          }
-    
-          # 8c) Remove any previous "Set vo=libmpv on ready" injection (cleanup)
+        
+          # 8b) Remove any previously injected "Set/Delayed vo=libmpv" blocks (cleanup)
           $t = [regex]::Replace(
             $t,
             '(?m)^\s*// \(CI patch\) Set vo=libmpv on ready.*\r?\n\s*Q_?EMIT\s+setProperty\(\s*"vo"\s*,\s*"libmpv"\s*\)\s*;\s*\r?\n',
             ''
           )
-    
-          # 8d) Inject a delayed setter just before setMpvController (runs inside ready handler)
-          if ($t -notmatch 'CI patch\)\s*Delayed vo=libmpv') {
+          $t = [regex]::Replace(
+            $t,
+            '(?m)^\s*// \(CI patch\) Delayed vo=libmpv:.*\r?\n(?:\s*QTimer::singleShot\(.*\);\s*\r?\n){1,5}',
+            ''
+          )
+        
+          # 8c) Remove any leftover injected singleShot lines that set vo=libmpv (extra safety)
+          $t = [regex]::Replace(
+            $t,
+            '(?m)^\s*QTimer::singleShot\(\s*\d+\s*,\s*this\s*,\s*\[this\]\(\)\s*\{\s*Q_?EMIT\s+setProperty\(\s*"vo"\s*,\s*"libmpv"\s*\)\s*;\s*\}\s*\)\s*;\s*$',
+            ''
+          )
+        
+          # 8d) (Optional but recommended) explicitly force vo=null so mpv never attempts libmpv
+          if ($t -notmatch 'CI patch\)\s*Force vo=null') {
             $t = [regex]::Replace(
               $t,
-              '(?m)^(\s*)mplayer->setMpvController\(mpvController\);\s*$',
-              ('$1// (CI patch) Delayed vo=libmpv: ready can fire before render context exists (Qt6/Qt Quick).' + $NL +
-               '$1QTimer::singleShot(0, this, [this]() { Q_EMIT setProperty("vo", "libmpv"); });' + $NL +
-               '$1QTimer::singleShot(50, this, [this]() { Q_EMIT setProperty("vo", "libmpv"); });' + $NL +
-               '$1mplayer->setMpvController(mpvController);'),
+              '(?m)^(MpvVideoItem::MpvVideoItem\([^\)]*\)\s*:\s*MpvAbstractItem[^{]*\{\s*\r?\n)',
+              ('$1    // (CI patch) Force vo=null (avoid libmpv until render context is fixed).' + $NL +
+               '    Q_EMIT setProperty("vo", "null");' + $NL),
               1
             )
           }
-    
+        
+          # 8e) Remove QTimer include if it was only added by our old patch (optional cleanup)
+          # (Safe to leave it; no harm. Keeping it avoids fighting patches.)
+          # $t = [regex]::Replace($t, '(?m)^\s*#include\s+<QTimer>\s*\r?\n', '')
+        
           if ($t -ne $orig) {
             Set-Content -Path $mpvItem -Value $t -Encoding UTF8
           } else {
             Write-Host "MpvVideoItem.cpp: no changes (already patched?)"
           }
         }
+ 
+
     
         # 9) PlayerComponent.cpp: pending queue + replay after initializeMpv (queued)
         $pc = "src/player/PlayerComponent.cpp"
