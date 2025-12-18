@@ -166,11 +166,6 @@ jobs:
         if (Test-Path $main) {
           $m = Get-Content $main -Raw -Encoding UTF8
     
-          # Ensure QTimer is available for titlebar nudge (added later)
-          if ($m -notmatch '(?m)^\s*#include\s+<QTimer>') {
-            $m = "#include <QTimer>$NL$m"
-          }
-    
           # 5a) Remove forced Qt Quick backend (Qt6 file contains setGraphicsApi(OpenGL); Qt5 did not)
           $m = [regex]::Replace(
             $m,
