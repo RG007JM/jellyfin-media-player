@@ -45,11 +45,9 @@ jobs:
 
         New-Item -ItemType Directory -Force -Path $angleRoot | Out-Null
 
-        # Kill gclient quarantine dirs from prior failures
         $bad = Join-Path $angleRoot "_bad_scm"
         if (Test-Path $bad) { Remove-Item -Recurse -Force $bad }
 
-        # depot_tools
         $depot = Join-Path $env:RUNNER_TEMP "depot_tools"
         if (-not (Test-Path $depot)) {
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $depot
@@ -60,10 +58,6 @@ jobs:
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
 
-        # Silence depot_tools trying to manage a missing global gitconfig on CI runners. [web:326]
-        cmd.exe /c "git config --global depot-tools.allowGlobalGitConfig false"
-
-        # Force deterministic gclient root/config
         Push-Location $angleRoot
 
         $gclientSpec = @(
@@ -80,20 +74,17 @@ jobs:
         ) -join $NL
         Set-Content -Encoding ASCII -Path (Join-Path $angleRoot ".gclient") -Value $gclientSpec
 
-        # If cache restored junk, wipe it
         if (Test-Path $src) {
           if (-not (Test-Path (Join-Path $src ".git"))) {
             Remove-Item -Recurse -Force $src
           }
         }
 
-        # DO NOT use --nohooks; hooks fetch toolchains (incl. rust-toolchain/VERSION). [web:311]
         cmd.exe /c "gclient sync"
         Pop-Location
 
         if (-not (Test-Path $src)) { throw "ANGLE checkout missing at $src after gclient sync" }
 
-        # args.gn generated via array join (no YAML-indent/whitespace traps)
         Push-Location $src
         New-Item -ItemType Directory -Force -Path "out/Release" | Out-Null
 
