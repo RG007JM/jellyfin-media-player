@@ -116,103 +116,207 @@ jobs:
           Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
         
-    - name: Patch sources (libmpv ready + titlebar + pending queue)
+    - name: Patch Source Code (Include Fix + No Forcing + libmpv ready + titlebar)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
         $NL = [Environment]::NewLine
     
-        function Patch-File([string]$path, [scriptblock]$mutator) {
-          if (-not (Test-Path $path)) { Write-Host "Skip missing $path"; return }
-          $t = Get-Content $path -Raw -Encoding UTF8
-          $o = $t
-          $t = & $mutator $t
-          if ($t -ne $o) {
-            Set-Content -Path $path -Value $t -Encoding UTF8
-            Write-Host "Patched $path"
-          } else {
-            Write-Host "No changes $path"
+        # 1) Patch src/CMakeLists.txt (strip optional components)
+        $cmakeFile = "src/CMakeLists.txt"
+        if (Test-Path $cmakeFile) {
+          $content = Get-Content $cmakeFile -Raw -Encoding UTF8
+          $content = [regex]::Replace($content, '(?mi)^.*mpris.*$', '')
+          $content = [regex]::Replace($content, '(?mi)^.*taskbar.*$', '')
+          $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
+          Set-Content -Path $cmakeFile -Value $content -Encoding UTF8
+        }
+    
+        # 2) Patch src/core/ComponentManager.cpp
+        $compMgr = "src/core/ComponentManager.cpp"
+        if (Test-Path $compMgr) {
+          $compContent = Get-Content $compMgr -Raw -Encoding UTF8
+          $compContent = [regex]::Replace($compContent, '(?mi)^\s*#include\s+.*MprisComponent\.h.*$', '')
+          $compContent = [regex]::Replace($compContent, '(?mi)^\s*#include\s+.*TaskbarComponent\.h.*$', '')
+          $compContent = [regex]::Replace($compContent, '(?mi)^.*MprisComponent.*$', '')
+          $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
+          Set-Content -Path $compMgr -Value $compContent -Encoding UTF8
+        }
+    
+        # 3) Patch src/ui/WindowManager.cpp
+        $winMgr = "src/ui/WindowManager.cpp"
+        if (Test-Path $winMgr) {
+          $winContent = Get-Content $winMgr -Raw -Encoding UTF8
+          $winContent = [regex]::Replace($winContent, '(?mi)^.*TaskbarComponent.*$', '')
+          Set-Content -Path $winMgr -Value $winContent -Encoding UTF8
+        }
+    
+        # 4) CodecsComponent.cpp: ensure windows.h is included (idempotent)
+        $codecs = "src/player/CodecsComponent.cpp"
+        if (Test-Path $codecs) {
+          $c = Get-Content $codecs -Raw -Encoding UTF8
+          if ($c -notmatch '(?m)^\s*#include\s+<windows\.h>') {
+            $c = "#include <windows.h>$NL$c"
+            Set-Content -Path $codecs -Value $c -Encoding UTF8
           }
         }
     
-        # --- main.cpp: remove forced graphics API + titlebar nudge ---
-        Patch-File "src/main.cpp" {
-          param($m)
+        # 5) main.cpp: REMOVE forcing so Qt6 behaves like the old Qt5 app
+        $main = "src/main.cpp"
+        if (Test-Path $main) {
+          $m = Get-Content $main -Raw -Encoding UTF8
     
-          if ($m -notmatch '(?m)^\s*#include\s+<QTimer>') { $m = "#include <QTimer>$NL$m" }
-    
-          $m = [regex]::Replace($m, '^[ \t]*QQuickWindow::setGraphicsApi\(\s*QSGRendererInterface::OpenGL\s*\)\s*;\s*\r?\n', '', 'Multiline')
-          $m = [regex]::Replace($m, '^[ \t]*QCoreApplication::setAttribute\(\s*Qt::AA_ShareOpenGLContexts\s*\)\s*;\s*\r?\n', '', 'Multiline')
-          $m = [regex]::Replace($m, '(?s)\r?\n\s*static\s+void\s+forceCompatOpenGL\s*\(\s*\)\s*\{.*?\}\s*\r?\n', "$NL", 'Singleline')
-          $m = [regex]::Replace($m, '^[ \t]*forceCompatOpenGL\(\);\s*\r?\n', '', 'Multiline')
-          $m = [regex]::Replace($m, '^[ \t]*qputenv\(\s*"QSG_RHI_BACKEND"\s*,\s*".*?"\s*\)\s*;\s*\r?\n', '', 'Multiline')
-    
-          if ($m -notmatch 'CI patch\)\s*Work around Windows title bar not painting') {
-            $m2 = [regex]::Replace(
-              $m,
-              '(?m)^(.*\bwindow(?:->|\.)setFlags\([^\)]*\)\s*;\s*)$',
-              ('$1' + $NL +
-               '#if defined(Q_OS_WIN)' + $NL +
-               '    // (CI patch) Work around Windows title bar not painting until first resize.' + $NL +
-               '    QTimer::singleShot(0, [&window]() {' + $NL +
-               '        const int w = window.width();' + $NL +
-               '        const int h = window.height();' + $NL +
-               '        window.resize(w + 1, h);' + $NL +
-               '        window.resize(w, h);' + $NL +
-               '    });' + $NL +
-               '#endif' + $NL),
-              1
-            )
-            if ($m2 -ne $m) { $m = $m2 } else { Write-Host "Titlebar anchor not found; skipped." }
+          # Ensure QTimer is available for titlebar nudge (added later)
+          if ($m -notmatch '(?m)^\s*#include\s+<QTimer>') {
+            $m = "#include <QTimer>$NL$m"
           }
     
-          $m
+          # 5a) Remove forced Qt Quick backend (Qt6 file contains setGraphicsApi(OpenGL); Qt5 did not)
+          $m = [regex]::Replace(
+            $m,
+            '^[ \t]*QQuickWindow::setGraphicsApi\(\s*QSGRendererInterface::OpenGL\s*\)\s*;\s*\r?\n',
+            '',
+            [System.Text.RegularExpressions.RegexOptions]::Multiline
+          )
+    
+          # 5b) Remove forced shared GL contexts (Qt5 main does not set this explicitly)
+          $m = [regex]::Replace(
+            $m,
+            '^[ \t]*QCoreApplication::setAttribute\(\s*Qt::AA_ShareOpenGLContexts\s*\)\s*;\s*\r?\n',
+            '',
+            [System.Text.RegularExpressions.RegexOptions]::Multiline
+          )
+    
+          # 5c) Remove any workflow-injected helper + call from earlier attempts (idempotent cleanup)
+          $m = [regex]::Replace(
+            $m,
+            '(?s)\r?\n\s*static\s+void\s+forceCompatOpenGL\s*\(\s*\)\s*\{.*?\}\s*\r?\n',
+            "$NL",
+            [System.Text.RegularExpressions.RegexOptions]::Singleline
+          )
+          $m = [regex]::Replace(
+            $m,
+            '^[ \t]*forceCompatOpenGL\(\);\s*\r?\n',
+            '',
+            [System.Text.RegularExpressions.RegexOptions]::Multiline
+          )
+    
+          # 5d) Remove any injected QSG_RHI_BACKEND forcing (Qt5 did not set this)
+          $m = [regex]::Replace(
+            $m,
+            '^[ \t]*qputenv\(\s*"QSG_RHI_BACKEND"\s*,\s*".*?"\s*\)\s*;\s*\r?\n',
+            '',
+            [System.Text.RegularExpressions.RegexOptions]::Multiline
+          )
+    
+          # 5e) Remove now-unneeded includes that may have been injected earlier (safe cleanup)
+          $m = [regex]::Replace($m, '(?m)^\s*#include\s+<QSurfaceFormat>\s*\r?\n', '')
+          $m = [regex]::Replace($m, '(?m)^\s*#include\s+<QCoreApplication>\s*\r?\n', '')
+    
+          # 5f) Titlebar invisible until resize: nudge after setFlags (dot or arrow, multiline-safe)
+          if ($m -notmatch 'CI patch\)\s*titlebar nudge') {
+            $rx = [regex]'(?s)(window(?:->|\.)setFlags\([^;]*\);\s*)'
+            $mm = $rx.Match($m)
+            if ($mm.Success) {
+              $insert = $mm.Groups[1].Value +
+                '#if defined(Q_OS_WIN)' + $NL +
+                '    // (CI patch) titlebar nudge: force a repaint of the native frame after show.' + $NL +
+                '    QTimer::singleShot(0, [&window]() {' + $NL +
+                '        const int w = window.width();' + $NL +
+                '        const int h = window.height();' + $NL +
+                '        window.resize(w + 1, h);' + $NL +
+                '        window.resize(w, h);' + $NL +
+                '    });' + $NL +
+                '#endif' + $NL
+              $m = $rx.Replace($m, $insert, 1)
+            } else {
+              Write-Host "Titlebar anchor not found; skipped."
+            }
+          }
+    
+          Set-Content -Path $main -Value $m -Encoding UTF8
         }
     
-        Write-Host "---- main.cpp verify ----"
-        Select-String -Path "src/main.cpp" -SimpleMatch -Pattern "setGraphicsApi", "AA_ShareOpenGLContexts", "QSG_RHI_BACKEND", "forceCompatOpenGL", "title bar not painting" |
-          ForEach-Object { Write-Host $_.Line }
-        Write-Host "-------------------------"
+        # 6) Remove qt.conf install + generation (required if qt.conf is deleted everywhere)
+        $filesToPatch = @(
+          "CMakeModules/CPackConfiguration.cmake",
+          "CMakeModules/QtConfiguration.cmake"
+        )
     
-        # --- MpvVideoItem.cpp: defer vo=libmpv until ready ---
-        Patch-File "src/player/MpvVideoItem.cpp" {
-          param($t)
+        foreach ($f in $filesToPatch) {
+          if (-not (Test-Path $f)) { continue }
+    
+          $t = Get-Content $f -Raw -Encoding UTF8
+          $orig = $t
     
           $t = [regex]::Replace(
             $t,
-            '(?m)^\s*QEMIT\s+setProperty\(\s*"vo"\s*,\s*"libmpv"\s*\)\s*;\s*$',
+            '(?mi)^\s*install\s*\(\s*FILES\s+\$\{CMAKE_SOURCE_DIR\}/bundle/win/qt\.conf\s+DESTINATION\s+\.\s*\)\s*$',
+            '# (CI patch) qt.conf disabled: install(FILES ${CMAKE_SOURCE_DIR}/bundle/win/qt.conf DESTINATION .)'
+          )
+    
+          $t = [regex]::Replace(
+            $t,
+            '(?mi)^\s*file\s*\(\s*WRITE\s+\$\{QTROOT\}/bin/qt\.conf\s+\$\{QTCONFCONTENT\}\s*\)\s*$',
+            '# (CI patch) qt.conf disabled: file(WRITE ${QTROOT}/bin/qt.conf ${QTCONFCONTENT})'
+          )
+    
+          if ($t -ne $orig) {
+            Set-Content -Path $f -Value $t -Encoding UTF8
+            Write-Host "Patched $f to disable qt.conf"
+          } else {
+            Write-Host "No qt.conf rule matched in $f (nothing changed)"
+          }
+        }
+    
+        # 7) Remove qt.conf files from repo tree (optional but matches "remove everywhere")
+        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
+        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
+    
+        # 8) MpvVideoItem.cpp: defer vo=libmpv until MpvAbstractItem::ready (fix "No render context set")
+        $mpvItem = "src/player/MpvVideoItem.cpp"
+        if (Test-Path $mpvItem) {
+          $t = Get-Content $mpvItem -Raw -Encoding UTF8
+          $orig = $t
+    
+          # Remove constructor-time vo=libmpv (supports Q_EMIT / QEMIT)
+          $t = [regex]::Replace(
+            $t,
+            '(?m)^\s*Q_?EMIT\s+setProperty\(\s*"vo"\s*,\s*"libmpv"\s*\)\s*;\s*$',
             '    // (CI patch) Do not set vo=libmpv in constructor; wait for MpvAbstractItem::ready.'
           )
     
+          # Insert vo=libmpv right before PlayerComponent initialization (before setMpvController)
           if ($t -notmatch 'CI patch\)\s*Set vo=libmpv on ready') {
             $t2 = [regex]::Replace(
               $t,
               '(?m)^(\s*)mplayer->setMpvController\(mpvController\);\s*$',
               ('$1// (CI patch) Set vo=libmpv on ready (render context should exist now).' + $NL +
-               '$1QEMIT setProperty("vo", "libmpv");' + $NL +
+               '$1Q_EMIT setProperty("vo", "libmpv");' + $NL +
                '$1mplayer->setMpvController(mpvController);'),
               1
             )
             $t = $t2
           }
     
-          $t
+          if ($t -ne $orig) {
+            Set-Content -Path $mpvItem -Value $t -Encoding UTF8
+          } else {
+            Write-Host "MpvVideoItem.cpp: no changes (already patched?)"
+          }
         }
     
-        Write-Host "---- MpvVideoItem.cpp verify ----"
-        Select-String -Path "src/player/MpvVideoItem.cpp" -SimpleMatch -Pattern 'setProperty("vo", "libmpv")','CI patch' |
-          ForEach-Object { Write-Host $_.Line }
-        Write-Host "--------------------------------"
+        # 9) PlayerComponent.cpp: queue early play requests until mpv is ready, then replay
+        $pc = "src/player/PlayerComponent.cpp"
+        if (Test-Path $pc) {
+          $p = Get-Content $pc -Raw -Encoding UTF8
+          $origp = $p
     
-        # --- PlayerComponent.cpp: keep pending play request until mpv is ready ---
-        Patch-File "src/player/PlayerComponent.cpp" {
-          param($p)
-    
-          # Insert pending globals near static wakeupcb
+          # Insert pending globals near wakeupcb
           if ($p -notmatch 'CI patch\)\s*pending media when mpv isn''t ready') {
-            $m = [regex]::Match($p, '(?m)^\s*static\s+void\s+wakeupcb')
-            if ($m.Success) {
-              $idx = $m.Index
+            $m2 = [regex]::Match($p, '(?m)^\s*static\s+void\s+wakeupcb')
+            if ($m2.Success) {
+              $idx = $m2.Index
               $ins = @(
                 ' // (CI patch) pending media when mpv isn''t ready yet (prevents dropped play request)'
                 ' static bool g_pendingLoad = false;'
@@ -227,7 +331,7 @@ jobs:
             }
           }
     
-          # Replace the early-return block in queueMedia
+          # Modify the early-return in queueMedia to store pending request
           if ($p -notmatch 'queueing request') {
             $p = [regex]::Replace(
               $p,
@@ -255,7 +359,7 @@ jobs:
             )
           }
     
-          # After emit onMpvEvents(); inside initializeMpv(), replay if pending
+          # Replay pending request after initializeMpv has emitted onMpvEvents()
           if ($p -notmatch 'CI patch\)\s*replay pending media') {
             $p = [regex]::Replace(
               $p,
@@ -270,15 +374,25 @@ jobs:
             )
           }
     
-          $p
+          if ($p -ne $origp) {
+            Set-Content -Path $pc -Value $p -Encoding UTF8
+          }
         }
     
-        Write-Host "---- PlayerComponent.cpp verify ----"
-        Select-String -Path "src/player/PlayerComponent.cpp" -SimpleMatch -Pattern "queueing request", "replay pending media" |
-          ForEach-Object { Write-Host $_.Line }
+        # 10) Checks
+        Write-Host "---- main.cpp forced API check ----"
+        Select-String -Path "src/main.cpp" -Pattern "setGraphicsApi","QSG_RHI_BACKEND","AA_ShareOpenGLContexts","forceCompatOpenGL" -SimpleMatch -List | ForEach-Object { $_.Line }
         Write-Host "-----------------------------------"
     
-
+        Write-Host "---- MpvVideoItem.cpp check ----"
+        Select-String -Path "src/player/MpvVideoItem.cpp" -SimpleMatch -Pattern 'setProperty("vo", "libmpv")','CI patch' | ForEach-Object { $_.Line }
+        Write-Host "--------------------------------"
+    
+        Write-Host "---- PlayerComponent.cpp check ----"
+        Select-String -Path "src/player/PlayerComponent.cpp" -SimpleMatch -Pattern "queueing request","replay pending media" | ForEach-Object { $_.Line }
+        Write-Host "-----------------------------------"
+    
+        Write-Host "Source patched (no forced graphics API; libmpv vo deferred; titlebar nudge added)."
 
     - name: Build Jellyfin Desktop
       shell: pwsh
