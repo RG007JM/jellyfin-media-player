@@ -114,13 +114,13 @@ jobs:
           $c = [regex]::Replace($c, 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe', 'vcredist_x64.exe')
           Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
-    - name: Patch Source Code (Include Fix + Prefer D3D11)
+    - name: Patch Source Code (Include Fix + No Forcing)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
         $NL = [Environment]::NewLine
     
-        # 1) Patch src/CMakeLists.txt
+        # 1) Patch src/CMakeLists.txt (strip optional components)
         $cmakeFile = "src/CMakeLists.txt"
         if (Test-Path $cmakeFile) {
           $content = Get-Content $cmakeFile -Raw -Encoding UTF8
@@ -159,39 +159,57 @@ jobs:
           }
         }
     
-        # 5) main.cpp: replicate Qt5 behavior (do not force graphics API) + prefer D3D11 on Windows
+        # 5) main.cpp: REMOVE forcing so Qt6 behaves like the old Qt5 app
         $main = "src/main.cpp"
         if (Test-Path $main) {
           $m = Get-Content $main -Raw -Encoding UTF8
     
-          # 5a) Replicate Qt5: remove forced QQuickWindow OpenGL backend
+          # 5a) Remove forced Qt Quick backend (Qt6 file contains setGraphicsApi(OpenGL); Qt5 did not)
           $m = [regex]::Replace(
             $m,
             '^[ \t]*QQuickWindow::setGraphicsApi\(\s*QSGRendererInterface::OpenGL\s*\)\s*;\s*\r?\n',
-            "// (CI patch) Removed forced QQuickWindow::setGraphicsApi(OpenGL) to match Qt5 behavior.$NL",
+            '',
             [System.Text.RegularExpressions.RegexOptions]::Multiline
           )
     
-          # 5b) Prefer DirectX (D3D11) for Qt Quick RHI on Windows (harmless elsewhere due to #if)
-          if ($m -notmatch 'QSG_RHI_BACKEND') {
-            $m2 = [regex]::Replace(
-              $m,
-              '(?s)(int\s+main\s*\([^\)]*\)\s*\{)',
-              ('$1' + $NL +
-               '#if defined(Q_OS_WIN)' + $NL +
-               '    // Prefer Direct3D 11 for Qt Quick (RHI) on Windows.' + $NL +
-               '    qputenv("QSG_RHI_BACKEND", "d3d11");' + $NL +
-               '#endif' + $NL),
-              1
-            )
-            if ($m2 -eq $m) { throw "Failed to insert QSG_RHI_BACKEND block (int main anchor not found)" }
-            $m = $m2
-          }
+          # 5b) Remove forced shared GL contexts (Qt5 main does not set this explicitly)
+          $m = [regex]::Replace(
+            $m,
+            '^[ \t]*QCoreApplication::setAttribute\(\s*Qt::AA_ShareOpenGLContexts\s*\)\s*;\s*\r?\n',
+            '',
+            [System.Text.RegularExpressions.RegexOptions]::Multiline
+          )
+    
+          # 5c) Remove any workflow-injected helper + call from earlier attempts (idempotent cleanup)
+          $m = [regex]::Replace(
+            $m,
+            '(?s)\r?\n\s*static\s+void\s+forceCompatOpenGL\s*\(\s*\)\s*\{.*?\}\s*\r?\n',
+            "$NL",
+            [System.Text.RegularExpressions.RegexOptions]::Singleline
+          )
+          $m = [regex]::Replace(
+            $m,
+            '^[ \t]*forceCompatOpenGL\(\);\s*\r?\n',
+            '',
+            [System.Text.RegularExpressions.RegexOptions]::Multiline
+          )
+    
+          # 5d) Remove any injected QSG_RHI_BACKEND forcing (Qt5 did not set this)
+          $m = [regex]::Replace(
+            $m,
+            '^[ \t]*qputenv\(\s*"QSG_RHI_BACKEND"\s*,\s*".*?"\s*\)\s*;\s*\r?\n',
+            '',
+            [System.Text.RegularExpressions.RegexOptions]::Multiline
+          )
+    
+          # 5e) Remove now-unneeded includes that may have been injected earlier (safe cleanup)
+          $m = [regex]::Replace($m, '(?m)^\s*#include\s+<QSurfaceFormat>\s*\r?\n', '')
+          $m = [regex]::Replace($m, '(?m)^\s*#include\s+<QCoreApplication>\s*\r?\n', '')
     
           Set-Content -Path $main -Value $m -Encoding UTF8
         }
     
-        # 6) Remove qt.conf install + generation
+        # 6) Remove qt.conf install + generation (required if qt.conf is deleted everywhere)
         $filesToPatch = @(
           "CMakeModules/CPackConfiguration.cmake",
           "CMakeModules/QtConfiguration.cmake"
@@ -223,14 +241,11 @@ jobs:
           }
         }
     
-        # 7) Remove qt.conf files
+        # 7) Remove qt.conf files from repo tree (optional but matches "remove everywhere")
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
     
-        Write-Host "Source patched (Qt5-like graphics selection + D3D11 preference)."
-
-
-
+        Write-Host "Source patched (no forced graphics API; closer to Qt5 behavior)."
 
     - name: Build Jellyfin Desktop
       shell: pwsh
