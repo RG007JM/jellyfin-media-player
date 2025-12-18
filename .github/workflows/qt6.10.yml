@@ -102,39 +102,19 @@ jobs:
         git clone --branch v1.1.1 https://github.com/KDE/mpvqt.git
         cd mpvqt
     
-        REM --- Existing: MpvController dtor patch (keep) ---
+        REM --- Existing: MpvController dtor patch (keep as-is from your workflow) ---
         powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
         echo. >> src\mpvcontroller.cpp
         echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
     
-        REM --- NEW: locate mpv_render_context_create callsite (for log visibility) ---
-        powershell -Command "$m = Get-ChildItem -Recurse -File src | Select-String -Pattern 'mpv_render_context_create' -List; if(-not $m){ throw 'mpvqt: mpv_render_context_create not found (cannot fix No render context set).'}; Write-Host ('mpvqt: render context create in ' + $m[0].Path)"
-    
-        REM --- NEW: force mpvqt to request OpenGL render API for libmpv (ANGLE/EGL on Windows) ---
-        REM mpv fails with 'No render context set' if the host never creates a render context. [web:143]
-        powershell -Command ^
-          "$ErrorActionPreference='Stop'; ^
-           $m = Get-ChildItem -Recurse -File src | Select-String -Pattern 'mpv_render_context_create' -List; ^
-           if(-not $m){ throw 'mpvqt: mpv_render_context_create not found. Cannot patch render backend.' }; ^
-           $path = $m[0].Path; ^
-           $c = Get-Content $path -Raw -Encoding UTF8; ^
-           $orig = $c; ^
-           # If mpvqt already specifies MPV_RENDER_PARAM_API_TYPE, do not touch it. ^
-           if($c -notmatch 'MPV_RENDER_PARAM_API_TYPE'){ ^
-             # Replace a typical call: mpv_render_context_create(&ctx, mpv, params); or similar. ^
-             # Insert params[] with MPV_RENDER_API_TYPE_OPENGL and pass it to mpv_render_context_create. ^
-             $c = [regex]::Replace($c, 'mpv_render_context_create\(\s*&(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)\s*;', ^
-               'mpv_render_param params[] = { { MPV_RENDER_PARAM_API_TYPE, (void*)MPV_RENDER_API_TYPE_OPENGL }, { MPV_RENDER_PARAM_INVALID, nullptr } };' + \"`r`n\" + ^
-               'mpv_render_context_create(&${1}, ${2}, params);'); ^
-           } ^
-           if($c -eq $orig){ Write-Host 'mpvqt: OpenGL render API patch did not apply (callsite differs).'; exit 1 } ^
-           Set-Content -Path $path -Value $c -Encoding UTF8; ^
-           Write-Host ('mpvqt: patched render backend in ' + $path);"
+        REM --- NEW: mpvqt patch to force OpenGL render API for libmpv ---
+        REM IMPORTANT: You are running under `shell: cmd`, so DO NOT use caret ^ inside the PowerShell script.
+        REM Use a single-line PowerShell -Command (semicolons) to avoid cmd line-continuation issues. [web:170]
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $hit = Get-ChildItem -Recurse -File src | Select-String -Pattern 'mpv_render_context_create' -List | Select-Object -First 1; if(-not $hit){ throw 'mpvqt: mpv_render_context_create not found'; }; $path = $hit.Path; Write-Host ('mpvqt: render context create in ' + $path); $c = Get-Content $path -Raw -Encoding UTF8; if($c -match 'MPV_RENDER_PARAM_API_TYPE'){ Write-Host 'mpvqt: already sets MPV_RENDER_PARAM_API_TYPE; skipping patch'; exit 0; }; $c2 = [regex]::Replace($c, 'mpv_render_context_create\(\s*&(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)\s*;', 'mpv_render_param params[] = { { MPV_RENDER_PARAM_API_TYPE, (void*)MPV_RENDER_API_TYPE_OPENGL }, { MPV_RENDER_PARAM_INVALID, nullptr } };' + \"`r`n\" + 'mpv_render_context_create(&${1}, ${2}, params);'); if($c2 -eq $c){ throw 'mpvqt: OpenGL render API patch did not apply (callsite differs)'; }; Set-Content -Path $path -Value $c2 -Encoding UTF8; Write-Host ('mpvqt: patched OpenGL render API in ' + $path);"
     
         cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" -DCMAKE_CXX_FLAGS="-I\"%INCLUDE_DIR_FWD%\""
         ninja -C build install
         cd ..
-
 
     - name: Download & Stage VC++ Redist and OpenSSL
       shell: pwsh
