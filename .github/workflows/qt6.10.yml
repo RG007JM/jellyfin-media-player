@@ -29,6 +29,44 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
+
+    - name: Build ANGLE (libEGL.dll + libGLESv2.dll)
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+
+        # ANGLE uses Chromium depot_tools (gn + autoninja). [web:391]
+        $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
+
+        # Put depot_tools on PATH
+        if (-not (Test-Path "depot_tools")) {
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
+        }
+        $env:Path = "$(Resolve-Path depot_tools);$env:Path"
+
+        # Fetch ANGLE source
+        if (-not (Test-Path "angle")) {
+          git clone https://chromium.googlesource.com/angle/angle.git angle
+        }
+
+        Push-Location angle
+
+        # Generate build files and build Release (x64)
+        # "is_component_build=true" produces the DLLs we need (libEGL/libGLESv2). [web:391]
+        gn gen out/Release --args="is_debug=false target_cpu=""x64"" is_component_build=true"
+        autoninja -C out/Release
+
+        $egl  = Join-Path (Get-Location) "out/Release/libEGL.dll"
+        $gles = Join-Path (Get-Location) "out/Release/libGLESv2.dll"
+        if (-not (Test-Path $egl))  { throw "ANGLE build did not produce libEGL.dll at $egl" }
+        if (-not (Test-Path $gles)) { throw "ANGLE build did not produce libGLESv2.dll at $gles" }
+
+        Pop-Location
+
+        New-Item -ItemType Directory -Force -Path "dep-install/bin" | Out-Null
+        Copy-Item -Force $egl  "dep-install/bin/libEGL.dll"
+        Copy-Item -Force $gles "dep-install/bin/libGLESv2.dll"
+
     - name: Prepare Libmpv (User Provided v3 URL)
       shell: pwsh
       run: |
