@@ -29,6 +29,15 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
+    - name: Cache ANGLE checkout
+      uses: actions/cache@v4
+      with:
+        path: |
+          angle-src
+        key: angle-win64-${{ runner.os }}-${{ hashFiles('.github/workflows/**') }}
+        restore-keys: |
+          angle-win64-${{ runner.os }}-
+
     - name: Build ANGLE (shallow checkout + runhooks)
       shell: pwsh
       run: |
@@ -66,6 +75,15 @@ jobs:
         New-Item -ItemType Directory -Force -Path "dep-install/bin" | Out-Null
         Copy-Item -Force (Join-Path $srcRoot "angle/out/Release/libEGL.dll")    "dep-install/bin/libEGL.dll"
         Copy-Item -Force (Join-Path $srcRoot "angle/out/Release/libGLESv2.dll") "dep-install/bin/libGLESv2.dll"
+
+    - name: Cache ANGLE checkout
+      uses: actions/cache@v4
+      with:
+        path: |
+          angle-src
+        key: angle-win64-${{ runner.os }}-${{ hashFiles('.github/workflows/**') }}
+        restore-keys: |
+          angle-win64-${{ runner.os }}-
 
     - name: Prepare Libmpv (User Provided v3 URL)
       shell: pwsh
