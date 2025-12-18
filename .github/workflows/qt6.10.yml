@@ -32,7 +32,6 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
-    # ---- ANGLE (cache + build) ----
     - name: ANGLE cache (checkout + out/Release)
       id: angle-cache
       uses: actions/cache@v4
@@ -50,6 +49,7 @@ jobs:
       run: |
         $ErrorActionPreference = "Stop"
         $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
+        $NL = [Environment]::NewLine
 
         $angleRoot = Join-Path $env:GITHUB_WORKSPACE "angle-src"
         $src = Join-Path $angleRoot "angle"
@@ -72,17 +72,20 @@ jobs:
 
         # gclient root (force deterministic config each run)
         Push-Location $angleRoot
-        @'
-solutions = [
-  {
-    "name": "angle",
-    "url": "https://chromium.googlesource.com/angle/angle.git",
-    "deps_file": "DEPS",
-    "managed": False,
-    "custom_vars": {},
-  },
-]
-'@ | Set-Content -Encoding ASCII (Join-Path $angleRoot ".gclient")
+
+        $gclientSpec = @(
+          'solutions = ['
+          '  {'
+          '    "name": "angle",'
+          '    "url": "https://chromium.googlesource.com/angle/angle.git",'
+          '    "deps_file": "DEPS",'
+          '    "managed": False,'
+          '    "custom_vars": {},'
+          '  },'
+          ']'
+          ''
+        ) -join $NL
+        Set-Content -Encoding ASCII -Path (Join-Path $angleRoot ".gclient") -Value $gclientSpec
 
         # If cache restored something weird, wipe it
         if (Test-Path $src) {
@@ -96,14 +99,16 @@ solutions = [
 
         if (-not (Test-Path $src)) { throw "ANGLE checkout missing at $src after gclient sync" }
 
-        # Build args via args.gn (no quoting issues)
+        # Build args via args.gn (constructed like your $inject to avoid whitespace/quoting issues)
         Push-Location $src
         New-Item -ItemType Directory -Force -Path "out/Release" | Out-Null
-        @'
-is_debug=false
-target_cpu="x64"
-is_component_build=false
-'@ | Set-Content -Encoding ASCII "out/Release/args.gn"
+
+        $gnArgs = @(
+          'is_debug=false'
+          'target_cpu="x64"'
+          'is_component_build=false'
+        ) -join $NL
+        Set-Content -Encoding ASCII -Path "out/Release/args.gn" -Value $gnArgs
 
         gn gen out/Release
         autoninja -C out/Release
@@ -125,7 +130,6 @@ is_component_build=false
           Copy-Item -Force (Join-Path $out "d3dcompiler_47.dll") "dep-install\bin\d3dcompiler_47.dll"
         }
 
-    # ---- Rest of deps ----
     - name: Prepare folders + Ninja + reuse
       shell: cmd
       run: |
