@@ -29,41 +29,40 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
-    - name: Build ANGLE (libEGL.dll + libGLESv2.dll)
+    - name: Build ANGLE (from source, run early)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
+
+        # Required on Windows when not using Google's internal toolchain. [file:456]
         $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
 
+        # Clean any stale client state from previous attempts
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "angle-src"
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "_bad_scm"
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "depot_tools"
+
         # depot_tools
-        if (-not (Test-Path "depot_tools")) {
-          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
-        }
+        git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
         $env:Path = "$(Resolve-Path depot_tools);$env:Path"
 
         Push-Location depot_tools
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
 
-        # Official ANGLE checkout flow: fetch angle [file:456]
-        if (-not (Test-Path "angle-src")) {
-          New-Item -ItemType Directory -Force -Path "angle-src" | Out-Null
-          Push-Location "angle-src"
-          fetch angle
-          Pop-Location
-        }
+        # Official ANGLE checkout flow. [file:456]
+        New-Item -ItemType Directory -Force -Path "angle-src" | Out-Null
+        Push-Location "angle-src"
+        fetch angle
+        Pop-Location
 
-        # Build it
+        # Build ANGLE DLLs
         Push-Location "angle-src/angle"
         gn gen out/Release --args="is_debug=false target_cpu=""x64"" is_component_build=true"
         autoninja -C out/Release
-
-        $egl  = Join-Path (Get-Location) "out/Release/libEGL.dll"
-        $gles = Join-Path (Get-Location) "out/Release/libGLESv2.dll"
-        if (-not (Test-Path $egl))  { throw "Missing $egl" }
-        if (-not (Test-Path $gles)) { throw "Missing $gles" }
         Pop-Location
 
+        # Stage into dep-install for your later deploy step (it already copies dep-install/bin/*.dll). [file:368]
         New-Item -ItemType Directory -Force -Path "dep-install/bin" | Out-Null
         Copy-Item -Force "angle-src/angle/out/Release/libEGL.dll"    "dep-install/bin/libEGL.dll"
         Copy-Item -Force "angle-src/angle/out/Release/libGLESv2.dll" "dep-install/bin/libGLESv2.dll"
