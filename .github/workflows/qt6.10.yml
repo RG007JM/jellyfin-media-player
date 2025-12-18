@@ -29,20 +29,12 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
-    - name: Build ANGLE (from source, isolated from repo gclient)
+    - name: Build ANGLE (shallow checkout + runhooks)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
-
-        # Required on Windows when not using Google's internal toolchain. [file:456]
         $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
 
-        # Work outside the repo so gclient doesn't pick up this repo's .gclient / branch overrides.
-        $angleRoot = Join-Path $env:RUNNER_TEMP "angle-client"
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $angleRoot
-        New-Item -ItemType Directory -Force -Path $angleRoot | Out-Null
-
-        # depot_tools (keep in temp too)
         $depot = Join-Path $env:RUNNER_TEMP "depot_tools"
         if (-not (Test-Path $depot)) {
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $depot
@@ -53,25 +45,27 @@ jobs:
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
 
-        # Make gclient treat $angleRoot as the client root (prevents it inheriting repo settings)
-        $env:GCLIENT_ROOT = $angleRoot
+        $srcRoot = Join-Path $env:RUNNER_TEMP "angle-src"
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $srcRoot
+        New-Item -ItemType Directory -Force -Path $srcRoot | Out-Null
 
-        # Official checkout flow. [file:456]
-        Push-Location $angleRoot
-        fetch angle
-        Pop-Location
+        # Shallow clone ANGLE (avoids huge "resolving deltas" stalls). [web:447]
+        Push-Location $srcRoot
+        git clone --depth 1 https://chromium.googlesource.com/angle/angle.git angle
+        Push-Location angle
 
-        # Build ANGLE
-        $src = Join-Path $angleRoot "angle"
-        Push-Location $src
+        # Bootstrap buildtools/gn via gclient hooks (fixes missing gn.exe). [web:419]
+        gclient config --unmanaged https://chromium.googlesource.com/angle/angle.git
+        gclient runhooks
+
         gn gen out/Release --args="is_debug=false target_cpu=""x64"" is_component_build=true"
         autoninja -C out/Release
         Pop-Location
+        Pop-Location
 
-        # Stage DLLs into dep-install/bin so your existing deploy step ships them. [file:368]
         New-Item -ItemType Directory -Force -Path "dep-install/bin" | Out-Null
-        Copy-Item -Force (Join-Path $src "out/Release/libEGL.dll")    "dep-install/bin/libEGL.dll"
-        Copy-Item -Force (Join-Path $src "out/Release/libGLESv2.dll") "dep-install/bin/libGLESv2.dll"
+        Copy-Item -Force (Join-Path $srcRoot "angle/out/Release/libEGL.dll")    "dep-install/bin/libEGL.dll"
+        Copy-Item -Force (Join-Path $srcRoot "angle/out/Release/libGLESv2.dll") "dep-install/bin/libGLESv2.dll"
 
     - name: Prepare Libmpv (User Provided v3 URL)
       shell: pwsh
