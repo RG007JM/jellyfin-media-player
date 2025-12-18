@@ -29,7 +29,7 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
-    - name: Build ANGLE (from source, run early)
+    - name: Build ANGLE (from source, isolated from repo gclient)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
@@ -37,35 +37,41 @@ jobs:
         # Required on Windows when not using Google's internal toolchain. [file:456]
         $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
 
-        # Clean any stale client state from previous attempts
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "angle-src"
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "_bad_scm"
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "depot_tools"
+        # Work outside the repo so gclient doesn't pick up this repo's .gclient / branch overrides.
+        $angleRoot = Join-Path $env:RUNNER_TEMP "angle-client"
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $angleRoot
+        New-Item -ItemType Directory -Force -Path $angleRoot | Out-Null
 
-        # depot_tools
-        git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
-        $env:Path = "$(Resolve-Path depot_tools);$env:Path"
+        # depot_tools (keep in temp too)
+        $depot = Join-Path $env:RUNNER_TEMP "depot_tools"
+        if (-not (Test-Path $depot)) {
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $depot
+        }
+        $env:Path = "$depot;$env:Path"
 
-        Push-Location depot_tools
+        Push-Location $depot
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
 
-        # Official ANGLE checkout flow. [file:456]
-        New-Item -ItemType Directory -Force -Path "angle-src" | Out-Null
-        Push-Location "angle-src"
+        # Make gclient treat $angleRoot as the client root (prevents it inheriting repo settings)
+        $env:GCLIENT_ROOT = $angleRoot
+
+        # Official checkout flow. [file:456]
+        Push-Location $angleRoot
         fetch angle
         Pop-Location
 
-        # Build ANGLE DLLs
-        Push-Location "angle-src/angle"
+        # Build ANGLE
+        $src = Join-Path $angleRoot "angle"
+        Push-Location $src
         gn gen out/Release --args="is_debug=false target_cpu=""x64"" is_component_build=true"
         autoninja -C out/Release
         Pop-Location
 
-        # Stage into dep-install for your later deploy step (it already copies dep-install/bin/*.dll). [file:368]
+        # Stage DLLs into dep-install/bin so your existing deploy step ships them. [file:368]
         New-Item -ItemType Directory -Force -Path "dep-install/bin" | Out-Null
-        Copy-Item -Force "angle-src/angle/out/Release/libEGL.dll"    "dep-install/bin/libEGL.dll"
-        Copy-Item -Force "angle-src/angle/out/Release/libGLESv2.dll" "dep-install/bin/libGLESv2.dll"
+        Copy-Item -Force (Join-Path $src "out/Release/libEGL.dll")    "dep-install/bin/libEGL.dll"
+        Copy-Item -Force (Join-Path $src "out/Release/libGLESv2.dll") "dep-install/bin/libGLESv2.dll"
 
     - name: Prepare Libmpv (User Provided v3 URL)
       shell: pwsh
