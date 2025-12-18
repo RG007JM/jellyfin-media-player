@@ -116,7 +116,7 @@ jobs:
           Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
         
-    - name: Patch Source Code (Include Fix + No Forcing + libmpv ready + titlebar)
+    - name: Patch Source Code (Include Fix + No Forcing + libmpv ready)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
@@ -203,7 +203,10 @@ jobs:
             '',
             [System.Text.RegularExpressions.RegexOptions]::Multiline
           )
- 
+    
+          Set-Content -Path $main -Value $m -Encoding UTF8
+        }
+    
         # 6) Remove qt.conf install + generation (required if qt.conf is deleted everywhere)
         $filesToPatch = @(
           "CMakeModules/CPackConfiguration.cmake",
@@ -278,7 +281,7 @@ jobs:
         if (Test-Path $pc) {
           $p = Get-Content $pc -Raw -Encoding UTF8
           $origp = $p
-        
+    
           # 9a) Insert pending globals right after includes (robust anchor)
           if ($p -notmatch 'CI patch\)\s*pending media globals') {
             $globals = @(
@@ -292,28 +295,16 @@ jobs:
               'static QVariant g_pendingSubtitleStream;'
               ''
             ) -join $NL
-        
-            # Insert after the last #include line in the file
+    
             $rxInc = [regex]'(?ms)\A(.*?(\r?\n))(?=\s*(static\s+void\s+wakeupcb|void\s+PlayerComponent::|PlayerComponent::PlayerComponent))'
             $mInc = $rxInc.Match($p)
             if ($mInc.Success) {
               $p = $mInc.Groups[1].Value + $globals + $p.Substring($mInc.Groups[1].Length)
             } else {
-              # Fallback: insert after the last include directive
-              $lines = $p -split "\r?\n", 0, "RegexMatch"
-              $lastInc = -1
-              for ($i=0; $i -lt $lines.Length; $i++) {
-                if ($lines[$i] -match '^\s*#include\b') { $lastInc = $i }
-              }
-              if ($lastInc -ge 0) {
-                $lines = $lines[0..$lastInc] + $globals + $lines[($lastInc+1)..($lines.Length-1)]
-                $p = ($lines -join $NL)
-              } else {
-                Write-Host "PlayerComponent.cpp: no include anchor found; skipping globals insert"
-              }
+              Write-Host "PlayerComponent.cpp: include anchor not found; skipping globals insert"
             }
           }
-        
+    
           # 9b) Modify queueMedia(): if (!m_mpv) store pending request and return
           if ($p -notmatch 'queueing request') {
             $p = [regex]::Replace(
@@ -340,7 +331,7 @@ jobs:
               1
             )
           }
-        
+    
           # 9c) After initializeMpv emits onMpvEvents(): replay pending request once
           if ($p -notmatch 'CI patch\)\s*replay pending media') {
             $p = [regex]::Replace(
@@ -355,17 +346,12 @@ jobs:
               1
             )
           }
-        
+    
           if ($p -ne $origp) {
             Set-Content -Path $pc -Value $p -Encoding UTF8
           }
-        
-          Write-Host "---- PlayerComponent.cpp check ----"
-          Select-String -Path $pc -SimpleMatch -Pattern "pending media globals", "queueing request", "replay pending media" |
-            ForEach-Object { Write-Host $_.Line }
-          Write-Host "-----------------------------------"
         }
-
+    
         # 10) Checks
         Write-Host "---- main.cpp forced API check ----"
         Select-String -Path "src/main.cpp" -Pattern "setGraphicsApi","QSG_RHI_BACKEND","AA_ShareOpenGLContexts","forceCompatOpenGL" -SimpleMatch -List | ForEach-Object { $_.Line }
@@ -379,7 +365,8 @@ jobs:
         Select-String -Path "src/player/PlayerComponent.cpp" -SimpleMatch -Pattern "queueing request","replay pending media" | ForEach-Object { $_.Line }
         Write-Host "-----------------------------------"
     
-        Write-Host "Source patched (no forced graphics API; libmpv vo deferred; titlebar nudge added)."
+        Write-Host "Source patched (no forced graphics API; libmpv vo deferred; pending queue enabled)."
+
 
     - name: Build Jellyfin Desktop
       shell: pwsh
