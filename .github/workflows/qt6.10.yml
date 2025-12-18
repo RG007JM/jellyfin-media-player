@@ -29,13 +29,13 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
-
     - name: Build ANGLE (libEGL.dll + libGLESv2.dll)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
         $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
 
+        # depot_tools
         if (-not (Test-Path "depot_tools")) {
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
         }
@@ -45,32 +45,28 @@ jobs:
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
 
-        if (-not (Test-Path "angle")) {
-          git clone --depth 1 https://chromium.googlesource.com/angle/angle.git angle
+        # Official ANGLE checkout flow: fetch angle [file:456]
+        if (-not (Test-Path "angle-src")) {
+          New-Item -ItemType Directory -Force -Path "angle-src" | Out-Null
+          Push-Location "angle-src"
+          fetch angle
+          Pop-Location
         }
 
-        Push-Location angle
-
-        if (-not (Test-Path ".gclient")) {
-          gclient config --unmanaged https://chromium.googlesource.com/angle/angle.git
-        }
-        gclient sync -D
-        gclient runhooks
-
+        # Build it
+        Push-Location "angle-src/angle"
         gn gen out/Release --args="is_debug=false target_cpu=""x64"" is_component_build=true"
         autoninja -C out/Release
 
-        $egl  = Get-ChildItem -Recurse "out/Release" -Filter "libEGL.dll"    | Select-Object -First 1
-        $gles = Get-ChildItem -Recurse "out/Release" -Filter "libGLESv2.dll" | Select-Object -First 1
-        if (-not $egl)  { throw "ANGLE build did not produce libEGL.dll under out/Release" }
-        if (-not $gles) { throw "ANGLE build did not produce libGLESv2.dll under out/Release" }
-
+        $egl  = Join-Path (Get-Location) "out/Release/libEGL.dll"
+        $gles = Join-Path (Get-Location) "out/Release/libGLESv2.dll"
+        if (-not (Test-Path $egl))  { throw "Missing $egl" }
+        if (-not (Test-Path $gles)) { throw "Missing $gles" }
         Pop-Location
 
         New-Item -ItemType Directory -Force -Path "dep-install/bin" | Out-Null
-        Copy-Item -Force $egl.FullName  "dep-install/bin/libEGL.dll"
-        Copy-Item -Force $gles.FullName "dep-install/bin/libGLESv2.dll"
-
+        Copy-Item -Force "angle-src/angle/out/Release/libEGL.dll"    "dep-install/bin/libEGL.dll"
+        Copy-Item -Force "angle-src/angle/out/Release/libGLESv2.dll" "dep-install/bin/libGLESv2.dll"
 
     - name: Prepare Libmpv (User Provided v3 URL)
       shell: pwsh
