@@ -208,29 +208,6 @@ jobs:
             '',
             [System.Text.RegularExpressions.RegexOptions]::Multiline
           )
-    
-          # 5f) Titlebar invisible until resize: nudge after setFlags (dot or arrow, multiline-safe)
-          #     main.cpp uses QQuickWindow* so use -> in the injected code.
-          if ($m -notmatch 'CI patch\)\s*titlebar nudge') {
-            $rx = [regex]'(?s)(window(?:->|\.)setFlags\([^;]*\);\s*)'
-            $mm = $rx.Match($m)
-            if ($mm.Success) {
-              $insert = $mm.Groups[1].Value +
-                '#if defined(Q_OS_WIN)' + $NL +
-                '    // (CI patch) titlebar nudge: force a repaint of the native frame after show.' + $NL +
-                '    QTimer::singleShot(0, [window]() {' + $NL +
-                '        if (!window) return;' + $NL +
-                '        const int w = window->width();' + $NL +
-                '        const int h = window->height();' + $NL +
-                '        window->resize(w + 1, h);' + $NL +
-                '        window->resize(w, h);' + $NL +
-                '    });' + $NL +
-                '#endif' + $NL
-              $m = $rx.Replace($m, $insert, 1)
-            } else {
-              Write-Host "Titlebar anchor not found; skipped."
-            }
-          }
  
         # 6) Remove qt.conf install + generation (required if qt.conf is deleted everywhere)
         $filesToPatch = @(
