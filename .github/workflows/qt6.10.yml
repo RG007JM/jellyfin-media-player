@@ -1,4 +1,4 @@
-name: Build Qt6.10 Windows x64 (DesktopGL + QSG diagnostics)
+name: Build Qt6.10 Windows x64 (DesktopGL + QSG diagnostics + ANGLE DLLs)
 
 on:
   workflow_dispatch:
@@ -252,7 +252,7 @@ jobs:
         Set-Location build
         cmd.exe /c "call `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat`" && ninja install"
 
-    - name: Deploy Qt and Finalize
+    - name: Deploy Qt and Finalize (copy ANGLE DLLs)
       shell: pwsh
       run: |
         $outDir = "$((Get-Location).Path)/output"
@@ -267,7 +267,7 @@ jobs:
 
         Write-Host "Detected Qt Bin Path: $qtBin"
 
-        # Copy key Qt DLLs (keep your current approach)
+        # Copy key Qt DLLs
         $qtDlls = @(
           "Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Network.dll",
           "Qt6Quick.dll","Qt6Qml.dll","Qt6Svg.dll","Qt6OpenGL.dll",
@@ -279,6 +279,16 @@ jobs:
           if (Test-Path $src) { Copy-Item -Force $src $outDir } else { Write-Warning "Could not find $src" }
         }
 
+        # ---- NEW: Ensure ANGLE runtime DLLs are deployed for QtWebEngine GPU ----
+        # These are required for the default WebEngine ANGLE/GLES path on Windows.
+        $angleDlls = @("libEGL.dll","libGLESv2.dll")
+        foreach ($a in $angleDlls) {
+          $src = Join-Path $qtBin $a
+          if (Test-Path $src) { Copy-Item -Force $src $outDir } else { Write-Warning "Could not find $src" }
+        }
+        # ----------------------------------------------------------------------
+
+        # WebEngine resources
         $qtRoot = Split-Path $qtBin -Parent
         $resSrc = Join-Path $qtRoot "resources"
         if (Test-Path $resSrc) {
@@ -286,9 +296,11 @@ jobs:
           Copy-Item -Force -Recurse (Join-Path $resSrc "*") (Join-Path $outDir "resources")
         }
 
+        # QtWebEngineProcess
         $processExe = Join-Path $qtBin "QtWebEngineProcess.exe"
         if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
 
+        # Deps (mpv, sdl2, openssl, etc)
         Copy-Item -Force "$depInstall/bin/*.dll" $outDir
 
         $exePath = Join-Path $outDir "Jellyfin Desktop.exe"
