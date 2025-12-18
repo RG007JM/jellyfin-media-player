@@ -121,7 +121,7 @@ jobs:
           Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (Include Fix + Qt5-style GL + libmpv)
+    - name: Patch Source Code (Include Fix + Qt5 GL selection + libmpv)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
@@ -166,16 +166,14 @@ jobs:
           }
         }
 
-        # 5) main.cpp: remove any previous forcing (idempotent)
+        # 5) main.cpp: remove any existing forcing + inject Qt5-style OpenGL selection
         $main = "src/main.cpp"
         if (Test-Path $main) {
           $m = Get-Content $main -Raw -Encoding UTF8
-
           $m = [regex]::Replace($m,'^[ \t]*QQuickWindow::setGraphicsApi\(.*\)\s*;\s*\r?\n','',[System.Text.RegularExpressions.RegexOptions]::Multiline)
           $m = [regex]::Replace($m,'^[ \t]*QCoreApplication::setAttribute\(\s*Qt::AA_ShareOpenGLContexts\s*\)\s*;\s*\r?\n','',[System.Text.RegularExpressions.RegexOptions]::Multiline)
           $m = [regex]::Replace($m,'^[ \t]*qputenv\(\s*"QSG_RHI_BACKEND"\s*,\s*".*?"\s*\)\s*;\s*\r?\n','',[System.Text.RegularExpressions.RegexOptions]::Multiline)
 
-          # 5b) Inject Qt5-style selection + OpenGL scenegraph for mpvqt
           if ($m -notmatch 'CI patch\)\s*Qt5-style GL selection') {
             $inject = @(
               '    // (CI patch) Qt5-style GL selection (Desktop GL vs OpenGLES/ANGLE) for mpvqt/libmpv embedding'
@@ -220,7 +218,7 @@ jobs:
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
 
-        Write-Host "Source patched (Qt5-style DesktopGL/OpenGLES selection enabled; mpvqt expects OpenGL)."
+        Write-Host "Source patched: Qt5-style DesktopGL/OpenGLES selection enabled; mpvqt OpenGL scenegraph restored."
 
     - name: Build Jellyfin Desktop
       shell: pwsh
@@ -269,8 +267,9 @@ jobs:
         if (-not (Test-Path $qtBin)) { throw "Qt bin path not found: $qtBin (QT_ROOT_DIR=$qtRootDir)" }
 
         Write-Host "Detected Qt Bin Path: $qtBin"
-
         $qtRoot = Split-Path $qtBin -Parent
+
+        Write-Host "Forcing Qt DLL copy..."
         $qtDlls = @(
           "Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Network.dll",
           "Qt6Quick.dll","Qt6Qml.dll","Qt6Svg.dll","Qt6OpenGL.dll",
@@ -279,9 +278,10 @@ jobs:
         )
         foreach ($q in $qtDlls) {
           $src = Join-Path $qtBin $q
-          if (Test-Path $src) { Copy-Item -Force $src $outDir }
+          if (Test-Path $src) { Copy-Item -Force $src $outDir } else { Write-Warning "Could not find $src" }
         }
 
+        Write-Host "Manually copying WebEngine Resources..."
         $resSrc = Join-Path $qtRoot "resources"
         if (Test-Path $resSrc) {
           New-Item -ItemType Directory -Force -Path (Join-Path $outDir "resources") | Out-Null
@@ -297,16 +297,27 @@ jobs:
         $qmlArgs = @()
         if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
 
+        Write-Host "Running windeployqt..."
         & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
 
         if (Test-Path "$outDir\qt.conf")  { Remove-Item -Force "$outDir\qt.conf" }
         if (Test-Path "$outDir\.qt.conf") { Remove-Item -Force "$outDir\.qt.conf" }
+
+        $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
+        $runtimeDll = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
+        if ($runtimeDll) {
+          $redistDir = $runtimeDll.DirectoryName
+          Copy-Item -Force "$redistDir\*.dll" $outDir
+        }
 
         $mpvConf = Join-Path $outDir "mpv.conf"
         @(
           "msg-level=all=v"
           "log-file=mpv.log"
         ) | Set-Content -Encoding UTF8 $mpvConf
+
+        Write-Host "--- Content of Output Dir ---"
+        Get-ChildItem $outDir | Select-Object Name
 
     - name: Create Portable Zip
       shell: pwsh
