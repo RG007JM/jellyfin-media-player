@@ -36,31 +36,37 @@ jobs:
         $ErrorActionPreference = "Stop"
         $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
 
-        # Clone depot_tools and initialize it (fixes python3_bin_reldir.txt missing). [web:391]
+        # depot_tools (gn/autoninja/gclient come from here). [web:391]
         if (-not (Test-Path "depot_tools")) {
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
         }
         $env:Path = "$(Resolve-Path depot_tools);$env:Path"
 
+        # Initialize depot_tools (fixes python3_bin_reldir.txt missing). [web:391]
         Push-Location depot_tools
-        # Initializes/updates depot_tools bootstrap (python, etc). [web:391]
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
 
-        # Fetch ANGLE
+        # ANGLE checkout
         if (-not (Test-Path "angle")) {
           git clone https://chromium.googlesource.com/angle/angle.git angle
         }
 
         Push-Location angle
 
+        # This creates/updates buildtools (including buildtools/win/gn/gn.exe). [web:391][web:419]
+        if (-not (Test-Path ".gclient")) {
+          gclient config --unmanaged https://chromium.googlesource.com/angle/angle.git
+        }
+        gclient sync -D
+        gclient runhooks
+
         # Build Release x64 shared libs
         gn gen out/Release --args="is_debug=false target_cpu=""x64"" is_component_build=true"
         autoninja -C out/Release
 
-        # Don’t assume exact output path; locate the DLLs
-        $egl  = Get-ChildItem -Recurse "out/Release" -Filter "libEGL.dll"   | Select-Object -First 1
-        $gles = Get-ChildItem -Recurse "out/Release" -Filter "libGLESv2.dll"| Select-Object -First 1
+        $egl  = Get-ChildItem -Recurse "out/Release" -Filter "libEGL.dll"    | Select-Object -First 1
+        $gles = Get-ChildItem -Recurse "out/Release" -Filter "libGLESv2.dll" | Select-Object -First 1
         if (-not $egl)  { throw "ANGLE build did not produce libEGL.dll under out/Release" }
         if (-not $gles) { throw "ANGLE build did not produce libGLESv2.dll under out/Release" }
 
@@ -69,7 +75,6 @@ jobs:
         New-Item -ItemType Directory -Force -Path "dep-install/bin" | Out-Null
         Copy-Item -Force $egl.FullName  "dep-install/bin/libEGL.dll"
         Copy-Item -Force $gles.FullName "dep-install/bin/libGLESv2.dll"
-
 
     - name: Prepare Libmpv (User Provided v3 URL)
       shell: pwsh
