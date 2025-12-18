@@ -114,13 +114,13 @@ jobs:
           $c = [regex]::Replace($c, 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe', 'vcredist_x64.exe')
           Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
-    - name: Patch Source Code (Include Fix + GL Compat)
+    - name: Patch Source Code (Include Fix + Prefer D3D11)
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
         $NL = [Environment]::NewLine
     
-        # 1) Patch src/CMakeLists.txt (strip optional components)
+        # 1) Patch src/CMakeLists.txt
         $cmakeFile = "src/CMakeLists.txt"
         if (Test-Path $cmakeFile) {
           $content = Get-Content $cmakeFile -Raw -Encoding UTF8
@@ -159,73 +159,39 @@ jobs:
           }
         }
     
-        # 5) main.cpp rendering fixes + compatibility helper
+        # 5) main.cpp: replicate Qt5 behavior (do not force graphics API) + prefer D3D11 on Windows
         $main = "src/main.cpp"
         if (Test-Path $main) {
           $m = Get-Content $main -Raw -Encoding UTF8
     
-          # 5a) Rendering fix: do NOT hard-force Qt Quick to OpenGL (can cause blank window)
-          if ($m -match 'QQuickWindow::setGraphicsApi\(\s*QSGRendererInterface::OpenGL\s*\)\s*;') {
-            $m = [regex]::Replace(
+          # 5a) Replicate Qt5: remove forced QQuickWindow OpenGL backend
+          $m = [regex]::Replace(
+            $m,
+            '^[ \t]*QQuickWindow::setGraphicsApi\(\s*QSGRendererInterface::OpenGL\s*\)\s*;\s*\r?\n',
+            "// (CI patch) Removed forced QQuickWindow::setGraphicsApi(OpenGL) to match Qt5 behavior.$NL",
+            [System.Text.RegularExpressions.RegexOptions]::Multiline
+          )
+    
+          # 5b) Prefer DirectX (D3D11) for Qt Quick RHI on Windows (harmless elsewhere due to #if)
+          if ($m -notmatch 'QSG_RHI_BACKEND') {
+            $m2 = [regex]::Replace(
               $m,
-              '^[ \t]*QQuickWindow::setGraphicsApi\(\s*QSGRendererInterface::OpenGL\s*\)\s*;\s*\r?\n',
-              "// (CI patch) Removed forced QQuickWindow::setGraphicsApi(OpenGL); let Qt choose.$NL",
-              [System.Text.RegularExpressions.RegexOptions]::Multiline
+              '(?s)(int\s+main\s*\([^\)]*\)\s*\{)',
+              ('$1' + $NL +
+               '#if defined(Q_OS_WIN)' + $NL +
+               '    // Prefer Direct3D 11 for Qt Quick (RHI) on Windows.' + $NL +
+               '    qputenv("QSG_RHI_BACKEND", "d3d11");' + $NL +
+               '#endif' + $NL),
+              1
             )
-          }
-    
-          # 5b) Port from Qt5 app: force "C" locale for mpv/ffmpeg float parsing (idempotent)
-          # Qt6 uses: char* newArgv = ...
-          # Qt5 used: char** newArgv = ...
-          if ($m -notmatch 'qputenv\("LC_NUMERIC"\s*,\s*"C"\)') {
-            $anchor = 'char\s*\*+\s+newArgv\s*=\s*appendCommandLineArguments\([^\)]*\);\s*'
-            $insert =
-              '$0' + $NL + $NL +
-              '// Qt calls setlocale(LC_ALL, ...) internally, which can break float parsing in mpv/ffmpeg.' + $NL +
-              '#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)' + $NL +
-              '    qputenv("LC_ALL", "C");' + $NL +
-              '    qputenv("LC_NUMERIC", "C");' + $NL +
-              '#endif' + $NL + $NL
-    
-            $m2 = [regex]::Replace($m, $anchor, $insert, 1)
-            if ($m2 -eq $m) { throw "LC_ALL/LC_NUMERIC patch anchor not found in src/main.cpp (newArgv line not matched)" }
+            if ($m2 -eq $m) { throw "Failed to insert QSG_RHI_BACKEND block (int main anchor not found)" }
             $m = $m2
-          }
-    
-          # 5c) Ensure required includes exist for forceCompatOpenGL helper (idempotent)
-          if ($m -notmatch '(?m)^\s*#include\s+<QSurfaceFormat>') { $m = "#include <QSurfaceFormat>$NL$m" }
-          if ($m -notmatch '(?m)^\s*#include\s+<QCoreApplication>') { $m = "#include <QCoreApplication>$NL$m" }
-    
-          # 5d) Insert helper + call (Desktop OpenGL + CompatibilityProfile)
-          if ($m -notmatch "forceCompatOpenGL") {
-            $fn = @(
-              'static void forceCompatOpenGL()',
-              '{',
-              '    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);',
-              '    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);',
-              '',
-              '    QSurfaceFormat fmt;',
-              '    fmt.setRenderableType(QSurfaceFormat::OpenGL);',
-              '    fmt.setVersion(3, 3);',
-              '    fmt.setProfile(QSurfaceFormat::CompatibilityProfile);',
-              '    fmt.setDepthBufferSize(24);',
-              '    fmt.setStencilBufferSize(8);',
-              '    QSurfaceFormat::setDefaultFormat(fmt);',
-              '}',
-              '',
-              ''
-            ) -join $NL
-    
-            $rxMain = [regex]::new("(?m)^\s*int\s+main\s*\(")
-            $m = $rxMain.Replace($m, $fn + "int main(", 1)
-    
-            $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{)', '$1' + $NL + '    forceCompatOpenGL();', 1)
           }
     
           Set-Content -Path $main -Value $m -Encoding UTF8
         }
     
-        # 6) Remove qt.conf install + generation (required if qt.conf is deleted everywhere)
+        # 6) Remove qt.conf install + generation
         $filesToPatch = @(
           "CMakeModules/CPackConfiguration.cmake",
           "CMakeModules/QtConfiguration.cmake"
@@ -233,6 +199,7 @@ jobs:
     
         foreach ($f in $filesToPatch) {
           if (-not (Test-Path $f)) { continue }
+    
           $t = Get-Content $f -Raw -Encoding UTF8
           $orig = $t
     
@@ -256,11 +223,12 @@ jobs:
           }
         }
     
-        # 7) Remove the actual files (optional but matches "remove everywhere")
+        # 7) Remove qt.conf files
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
     
-        Write-Host "Source patched (includes + GL compat + rendering fixes)."
+        Write-Host "Source patched (Qt5-like graphics selection + D3D11 preference)."
+
 
 
 
