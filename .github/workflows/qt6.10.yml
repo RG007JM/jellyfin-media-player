@@ -338,6 +338,12 @@ jobs:
           $redistDir = $runtimeDll.DirectoryName
           Copy-Item -Force "$redistDir\*.dll" $outDir
         }
+
+        $mpvConf = Join-Path $outDir "mpv.conf"
+        @(
+          "msg-level=all=v"
+          "log-file=mpv.log"
+        ) | Set-Content -Encoding UTF8 $mpvConf
     
         Write-Host "--- Content of Output Dir ---"
         Get-ChildItem $outDir | Select-Object Name
