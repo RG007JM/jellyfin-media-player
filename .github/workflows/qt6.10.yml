@@ -258,7 +258,7 @@ jobs:
     
           # Insert vo=libmpv right before PlayerComponent initialization (before setMpvController)
           if ($t -notmatch 'CI patch\)\s*Set vo=libmpv on ready') {
-            $t2 = [regex]::Replace(
+            $t = [regex]::Replace(
               $t,
               '(?m)^(\s*)mplayer->setMpvController\(mpvController\);\s*$',
               ('$1// (CI patch) Set vo=libmpv on ready (render context should exist now).' + $NL +
@@ -266,7 +266,6 @@ jobs:
                '$1mplayer->setMpvController(mpvController);'),
               1
             )
-            $t = $t2
           }
     
           if ($t -ne $orig) {
@@ -275,86 +274,8 @@ jobs:
             Write-Host "MpvVideoItem.cpp: no changes (already patched?)"
           }
         }
-        # 8b) READY-GATE: mark PlayerComponent when MpvVideoItem::ready fires, and require it in queueMedia
-
-        # 8b-1) MpvVideoItem.cpp: set dynamic property "_mpvVideoReady" right before initializeMpv()
-        $mpvItem = "src/player/MpvVideoItem.cpp"
-        if (Test-Path $mpvItem) {
-          $t = Get-Content $mpvItem -Raw -Encoding UTF8
-          $orig = $t
-        
-          if ($t -notmatch '_mpvVideoReady') {
-            $t = [regex]::Replace(
-              $t,
-              '(?m)^(\s*)mplayer->initializeMpv\(\);\s*$',
-              ('$1mplayer->setProperty("_mpvVideoReady", true);' + $NL +
-               '$1mplayer->initializeMpv();'),
-              1
-            )
-          }
-        
-          if ($t -ne $orig) {
-            Set-Content -Path $mpvItem -Value $t -Encoding UTF8
-            Write-Host "Patched MpvVideoItem.cpp: added _mpvVideoReady flag set."
-          }
-        }
-        
-        # 8b-2) PlayerComponent.cpp: change queueMedia guard to also require _mpvVideoReady
-        $pc = "src/player/PlayerComponent.cpp"
-        if (Test-Path $pc) {
-          $p = Get-Content $pc -Raw -Encoding UTF8
-          $origp = $p
-        
-          if ($p -notmatch 'mpv/video not ready; queueing request') {
-            $p = [regex]::Replace(
-              $p,
-              '(?s)(void\s+PlayerComponent::queueMedia\([^\)]*\)\s*\{.*?)(if\s*\(\s*!\s*m_mpv\s*\)\s*\{.*?return;\s*\})(\s*)',
-              {
-                param($mm)
-                $head = $mm.Groups[1].Value
-                $tailSpace = $mm.Groups[3].Value
-                $replacement = @(
-                  'if (!m_mpv || !property("_mpvVideoReady").toBool()) {'
-                  '  qWarning() << "PlayerComponent::queueMedia - mpv/video not ready; queueing request";'
-                  '  g_pendingLoad = true;'
-                  '  g_pendingUrl = url;'
-                  '  g_pendingOptions = options;'
-                  '  g_pendingMetadata = metadata;'
-                  '  g_pendingAudioStream = audioStream;'
-                  '  g_pendingSubtitleStream = subtitleStream;'
-                  '  return;'
-                  '}'
-                ) -join $NL
-                return $head + $replacement + $tailSpace
-              },
-              1
-            )
-          }
-        
-          # Also ensure the replay only happens when video is ready
-          if ($p -match 'replay pending media request now that mpv is ready' -and $p -notmatch 'property\("_mpvVideoReady"\)') {
-            $p = [regex]::Replace(
-              $p,
-              '(?s)// \(CI patch\) replay pending media request now that mpv is ready\s*if \(g_pendingLoad\)\s*\{',
-              ('// (CI patch) replay pending media request now that mpv is ready' + $NL +
-               '  if (g_pendingLoad && property("_mpvVideoReady").toBool()) {'),
-              1
-            )
-          }
-        
-          if ($p -ne $origp) {
-            Set-Content -Path $pc -Value $p -Encoding UTF8
-            Write-Host "Patched PlayerComponent.cpp: added _mpvVideoReady gating."
-          }
-        
-          Write-Host "---- ready-gate check ----"
-          Select-String -Path $mpvItem -SimpleMatch -Pattern '_mpvVideoReady' | ForEach-Object { Write-Host $_.Line }
-          Select-String -Path $pc -SimpleMatch -Pattern 'mpv/video not ready; queueing request','property("_mpvVideoReady")' | ForEach-Object { Write-Host $_.Line }
-          Write-Host "--------------------------"
-        }
-
     
-        # 9) PlayerComponent.cpp: queue early play requests until mpv is ready, then replay
+        # 9) PlayerComponent.cpp: queue early play requests until mpv is ready, then replay (single authoritative patch)
         $pc = "src/player/PlayerComponent.cpp"
         if (Test-Path $pc) {
           $p = Get-Content $pc -Raw -Encoding UTF8
@@ -383,8 +304,8 @@ jobs:
             }
           }
     
-          # 9b) Modify queueMedia(): if (!m_mpv) store pending request and return
-          if ($p -notmatch 'queueing request') {
+          # 9b) Modify queueMedia(): if (!m_mpv) store pending request and return (idempotent)
+          if ($p -notmatch 'mpv not initialized yet; queueing request') {
             $p = [regex]::Replace(
               $p,
               '(?s)(void\s+PlayerComponent::queueMedia\([^\)]*\)\s*\{.*?)(if\s*\(\s*!\s*m_mpv\s*\)\s*\{.*?return;\s*\})(\s*)',
@@ -410,7 +331,7 @@ jobs:
             )
           }
     
-          # 9c) After initializeMpv emits onMpvEvents(): replay pending request once
+          # 9c) After initializeMpv emits onMpvEvents(): replay pending request ONCE (queued to next event loop tick)
           if ($p -notmatch 'CI patch\)\s*replay pending media') {
             $p = [regex]::Replace(
               $p,
@@ -419,14 +340,31 @@ jobs:
                '  // (CI patch) replay pending media request now that mpv is ready' + $NL +
                '  if (g_pendingLoad) {' + $NL +
                '    g_pendingLoad = false;' + $NL +
-               '    queueMedia(g_pendingUrl, g_pendingOptions, g_pendingMetadata, g_pendingAudioStream, g_pendingSubtitleStream);' + $NL +
+               '    const auto u = g_pendingUrl;' + $NL +
+               '    const auto o = g_pendingOptions;' + $NL +
+               '    const auto m = g_pendingMetadata;' + $NL +
+               '    const auto a = g_pendingAudioStream;' + $NL +
+               '    const auto s = g_pendingSubtitleStream;' + $NL +
+               '    QTimer::singleShot(0, this, [this, u, o, m, a, s]() { queueMedia(u, o, m, a, s); });' + $NL +
                '  }' + $NL),
+              1
+            )
+          }
+    
+          # Ensure QTimer is available (only add once, near other includes)
+          if ($p -notmatch '(?m)^\s*#include\s+<QTimer>\s*$') {
+            $p = [regex]::Replace(
+              $p,
+              '(?m)^(#include\s+<QRegularExpression>\s*\r?\n)',
+              ('$1#include <QTimer>' + $NL),
               1
             )
           }
     
           if ($p -ne $origp) {
             Set-Content -Path $pc -Value $p -Encoding UTF8
+          } else {
+            Write-Host "PlayerComponent.cpp: no changes (already patched?)"
           }
         }
     
@@ -440,10 +378,11 @@ jobs:
         Write-Host "--------------------------------"
     
         Write-Host "---- PlayerComponent.cpp check ----"
-        Select-String -Path "src/player/PlayerComponent.cpp" -SimpleMatch -Pattern "queueing request","replay pending media" | ForEach-Object { $_.Line }
+        Select-String -Path "src/player/PlayerComponent.cpp" -SimpleMatch -Pattern "mpv not initialized yet; queueing request","replay pending media request now that mpv is ready","QTimer::singleShot" | ForEach-Object { $_.Line }
         Write-Host "-----------------------------------"
     
         Write-Host "Source patched (no forced graphics API; libmpv vo deferred; pending queue enabled)."
+
 
 
     - name: Build Jellyfin Desktop
