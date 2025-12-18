@@ -1,4 +1,4 @@
-name: Build Qt6.10 Windows x64 (DesktopGL + GLES/ANGLE)
+name: Build Qt6.10 Windows x64 (Auto software fallback 8s)
 
 on:
   workflow_dispatch:
@@ -121,7 +121,7 @@ jobs:
           Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (Include Fix + Qt conf + remove forced DesktopGL)
+    - name: Patch Source Code (Include Fix + GL Compat + Auto fallback 8s)
       shell: pwsh
       run: |
         # 1) Patch src/CMakeLists.txt
@@ -157,68 +157,108 @@ jobs:
           Set-Content $codecs $c -Encoding UTF8
         }
 
-        # 5) main.cpp: REMOVE forced Desktop OpenGL compat patch if present (keep runtime DesktopGL vs GLES)
+        # 5) main.cpp: force Desktop OpenGL compat + auto software fallback (8s watchdog)
         $main = "src/main.cpp"
         if (Test-Path $main) {
           $m = Get-Content $main -Raw -Encoding UTF8
 
-          # Remove helper function if previously injected
-          $m2 = [regex]::Replace(
-            $m,
-            "(?s)\r?\n\s*static\s+void\s+forceCompatOpenGL\s*\(\s*\)\s*\{.*?\}\s*\r?\n",
-            "`r`n"
-          )
+          if ($m -notmatch '#include\s+<QSurfaceFormat>') { $m = "#include <QSurfaceFormat>`r`n" + $m }
+          if ($m -notmatch '#include\s+<QCoreApplication>') { $m = "#include <QCoreApplication>`r`n" + $m }
+          if ($m -notmatch '#include\s+<QProcess>') { $m = "#include <QProcess>`r`n" + $m }
+          if ($m -notmatch '#include\s+<QTimer>') { $m = "#include <QTimer>`r`n" + $m }
+          if ($m -notmatch '#include\s+<windows\.h>') { $m = "#include <windows.h>`r`n" + $m }
 
-          # Remove call if previously injected
-          $m2 = [regex]::Replace(
-            $m2,
-            "(?m)^\s*forceCompatOpenGL\s*\(\s*\)\s*;\s*\r?\n",
-            ""
-          )
+          if ($m -notmatch "forceCompatOpenGL") {
+            $fn = @(
+              'static void forceCompatOpenGL()'
+              '{'
+              '    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);'
+              '    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);'
+              ''
+              '    QSurfaceFormat fmt;'
+              '    fmt.setRenderableType(QSurfaceFormat::OpenGL);'
+              '    fmt.setVersion(3, 3);'
+              '    fmt.setProfile(QSurfaceFormat::CompatibilityProfile);'
+              '    fmt.setDepthBufferSize(24);'
+              '    fmt.setStencilBufferSize(8);'
+              '    QSurfaceFormat::setDefaultFormat(fmt);'
+              '}'
+              ''
+              ''
+              'static bool relaunchSoftwareFallback(char **argv)'
+              '{'
+              '    if (qEnvironmentVariableIsSet("JFD_SOFTWARE_FALLBACK")) {'
+              '        return false;'
+              '    }'
+              '    qputenv("JFD_SOFTWARE_FALLBACK", "1");'
+              '    qputenv("QT_QUICK_BACKEND", "software");'
+              '    qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu-compositing");'
+              ''
+              '    QString program = QCoreApplication::applicationFilePath();'
+              '    QStringList args;'
+              '    for (int i = 1; argv && argv[i]; ++i) {'
+              '        args << QString::fromLocal8Bit(argv[i]);'
+              '    }'
+              '    return QProcess::startDetached(program, args);'
+              '}'
+              ''
+              ''
+            ) -join "`r`n"
 
-          if ($m2 -ne $m) {
-            Set-Content $main $m2 -Encoding UTF8
-            Write-Host "Removed forced Desktop OpenGL compat injection from src/main.cpp"
-          } else {
-            Write-Host "No forced Desktop OpenGL compat injection found in src/main.cpp"
+            $rxMain = [regex]::new("(?m)^\s*int\s+main\s*\(")
+            $m = $rxMain.Replace($m, $fn + "int main(", 1)
           }
+
+          if ($m -notmatch "forceCompatOpenGL\(\);") {
+            $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{)', '$1' + "`r`n    forceCompatOpenGL();", 1)
+          }
+
+          if ($m -notmatch "JFD_FALLBACK_WATCHDOG") {
+            $inject = @(
+              '    // If we were relaunched in fallback mode, force software before QtQuick/WebEngine init.'
+              '    if (qEnvironmentVariableIsSet("JFD_SOFTWARE_FALLBACK")) {'
+              '        qputenv("QT_QUICK_BACKEND", "software");'
+              '        qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu-compositing");'
+              '    }'
+              ''
+              '    // JFD_FALLBACK_WATCHDOG: black-screen/hang heuristic (8s).'
+              '    if (!qEnvironmentVariableIsSet("JFD_SOFTWARE_FALLBACK")) {'
+              '        QTimer::singleShot(8000, [argv]() {'
+              '            relaunchSoftwareFallback(argv);'
+              '            ::ExitProcess(0);'
+              '        });'
+              '    }'
+              ''
+            ) -join "`r`n"
+
+            $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{\s*)', '$1' + "`r`n" + $inject, 1)
+          }
+
+          Set-Content $main $m -Encoding UTF8
         }
 
-        # 6) Remove qt.conf install + generation (required if qt.conf is deleted everywhere)
+        # 6) Remove qt.conf install + generation
         $filesToPatch = @(
           "CMakeModules/CPackConfiguration.cmake",
           "CMakeModules/QtConfiguration.cmake"
         )
-
         foreach ($f in $filesToPatch) {
           if (-not (Test-Path $f)) { continue }
-
           $t = Get-Content $f -Raw -Encoding UTF8
           $orig = $t
-
           $t = [regex]::Replace($t,
             '(?mi)^\s*install\s*\(\s*FILES\s+\$\{CMAKE_SOURCE_DIR\}/bundle/win/qt\.conf\s+DESTINATION\s+\.\s*\)\s*$',
-            '# (CI patch) qt.conf disabled: install(FILES ${CMAKE_SOURCE_DIR}/bundle/win/qt.conf DESTINATION .)'
+            '# (CI patch) qt.conf disabled'
           )
-
           $t = [regex]::Replace($t,
             '(?mi)^\s*file\s*\(\s*WRITE\s+\$\{QTROOT\}/bin/qt\.conf\s+\$\{QTCONFCONTENT\}\s*\)\s*$',
-            '# (CI patch) qt.conf disabled: file(WRITE ${QTROOT}/bin/qt.conf ${QTCONFCONTENT})'
+            '# (CI patch) qt.conf disabled'
           )
-
-          if ($t -ne $orig) {
-            Set-Content -Path $f -Value $t -Encoding UTF8
-            Write-Host "Patched $f to disable qt.conf"
-          } else {
-            Write-Host "No qt.conf rule matched in $f (nothing changed)"
-          }
+          if ($t -ne $orig) { Set-Content -Path $f -Value $t -Encoding UTF8 }
         }
 
-        # 7) Remove the actual file from the repo tree (optional but matches "remove everywhere")
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
-
-        Write-Host "Source patched."
 
     - name: Build Jellyfin Desktop
       shell: pwsh
@@ -265,11 +305,8 @@ jobs:
 
         $qtBin = Join-Path $qtRootDir "bin"
         if (-not (Test-Path $qtBin)) { throw "Qt bin path not found: $qtBin (QT_ROOT_DIR=$qtRootDir)" }
-
-        Write-Host "Detected Qt Bin Path: $qtBin"
         $qtRoot = Split-Path $qtBin -Parent
 
-        Write-Host "Forcing Qt DLL copy..."
         $qtDlls = @(
           "Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Network.dll",
           "Qt6Quick.dll","Qt6Qml.dll","Qt6Svg.dll","Qt6OpenGL.dll",
@@ -278,10 +315,9 @@ jobs:
         )
         foreach ($q in $qtDlls) {
           $src = Join-Path $qtBin $q
-          if (Test-Path $src) { Copy-Item -Force $src $outDir } else { Write-Warning "Could not find $src" }
+          if (Test-Path $src) { Copy-Item -Force $src $outDir }
         }
 
-        Write-Host "Manually copying WebEngine Resources..."
         $resSrc = Join-Path $qtRoot "resources"
         if (Test-Path $resSrc) {
           New-Item -ItemType Directory -Force -Path (Join-Path $outDir "resources") | Out-Null
@@ -297,39 +333,17 @@ jobs:
         $qmlArgs = @()
         if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
 
-        Write-Host "Running windeployqt..."
         & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
 
         if (Test-Path "$outDir\qt.conf")  { Remove-Item -Force "$outDir\qt.conf" }
         if (Test-Path "$outDir\.qt.conf") { Remove-Item -Force "$outDir\.qt.conf" }
 
-        # Stage VC runtime
         $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
         $runtimeDll = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
         if ($runtimeDll) {
           $redistDir = $runtimeDll.DirectoryName
           Copy-Item -Force "$redistDir\*.dll" $outDir
         }
-
-        Write-Host "--- Content of Output Dir ---"
-        Get-ChildItem $outDir | Select-Object Name
-
-    - name: Stage ANGLE DLLs from repo root
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = "Stop"
-        $outDir = "$((Get-Location).Path)/output"
-
-        $egl = Join-Path $env:GITHUB_WORKSPACE "libEGL.dll"
-        $gles = Join-Path $env:GITHUB_WORKSPACE "libGLESv2.dll"
-
-        if (!(Test-Path $egl))  { throw "Missing $egl (expected in repo root)" }
-        if (!(Test-Path $gles)) { throw "Missing $gles (expected in repo root)" }
-
-        Copy-Item -Force $egl  $outDir
-        Copy-Item -Force $gles $outDir
-
-        Write-Host "Staged ANGLE DLLs into output\"
 
     - name: Create Portable Zip
       shell: pwsh
