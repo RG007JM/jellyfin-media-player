@@ -118,6 +118,7 @@ jobs:
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
+        $NL = [Environment]::NewLine
     
         # 1) Patch src/CMakeLists.txt (strip optional components)
         $cmakeFile = "src/CMakeLists.txt"
@@ -153,7 +154,7 @@ jobs:
         if (Test-Path $codecs) {
           $c = Get-Content $codecs -Raw -Encoding UTF8
           if ($c -notmatch '(?m)^\s*#include\s+<windows\.h>') {
-            $c = "#include <windows.h>`r`n" + $c
+            $c = "#include <windows.h>$NL$c"
             Set-Content -Path $codecs -Value $c -Encoding UTF8
           }
         }
@@ -168,7 +169,7 @@ jobs:
             $m = [regex]::Replace(
               $m,
               '^[ \t]*QQuickWindow::setGraphicsApi\(\s*QSGRendererInterface::OpenGL\s*\)\s*;\s*\r?\n',
-              '// (CI patch) Removed forced QQuickWindow::setGraphicsApi(OpenGL); let Qt choose.\r\n',
+              "// (CI patch) Removed forced QQuickWindow::setGraphicsApi(OpenGL); let Qt choose.$NL",
               [System.Text.RegularExpressions.RegexOptions]::Multiline
             )
           }
@@ -177,26 +178,25 @@ jobs:
           # Insert after: char** newArgv = appendCommandLineArguments(...)
           if ($m -notmatch 'qputenv\("LC_NUMERIC"\s*,\s*"C"\)') {
             $anchor = 'char\*\*\s+newArgv\s*=\s*appendCommandLineArguments\([^\)]*\);\s*'
-            $replacement = @"
-            $0
-            // Qt calls setlocale(LC_ALL, ...) internally, which can break float parsing in mpv/ffmpeg.
-            #if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)
-                qputenv("LC_ALL", "C");
-                qputenv("LC_NUMERIC", "C");
-            #endif
-            
-            "@
-            $m2 = [regex]::Replace($m, $anchor, $replacement, 1)
+            $insert =
+              '$0' + $NL + $NL +
+              '// Qt calls setlocale(LC_ALL, ...) internally, which can break float parsing in mpv/ffmpeg.' + $NL +
+              '#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)' + $NL +
+              '    qputenv("LC_ALL", "C");' + $NL +
+              '    qputenv("LC_NUMERIC", "C");' + $NL +
+              '#endif' + $NL + $NL
+    
+            $m2 = [regex]::Replace($m, $anchor, $insert, 1)
             if ($m2 -eq $m) { throw "LC_ALL/LC_NUMERIC patch anchor not found in src/main.cpp" }
             $m = $m2
           }
     
           # 5c) Ensure required includes exist for forceCompatOpenGL helper (idempotent)
           if ($m -notmatch '(?m)^\s*#include\s+<QSurfaceFormat>') {
-            $m = "#include <QSurfaceFormat>`r`n" + $m
+            $m = "#include <QSurfaceFormat>$NL$m"
           }
           if ($m -notmatch '(?m)^\s*#include\s+<QCoreApplication>') {
-            $m = "#include <QCoreApplication>`r`n" + $m
+            $m = "#include <QCoreApplication>$NL$m"
           }
     
           # 5d) Keep your existing helper insertion (Desktop OpenGL + CompatibilityProfile)
@@ -217,14 +217,14 @@ jobs:
               '}',
               '',
               ''
-            ) -join "`r`n"
+            ) -join $NL
     
             # Insert helper before first "int main("
             $rxMain = [regex]::new("(?m)^\s*int\s+main\s*\(")
             $m = $rxMain.Replace($m, $fn + "int main(", 1)
     
             # Insert call immediately after main() opening brace
-            $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{)', '$1' + "`r`n    forceCompatOpenGL();", 1)
+            $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{)', '$1' + $NL + '    forceCompatOpenGL();', 1)
           }
     
           Set-Content -Path $main -Value $m -Encoding UTF8
@@ -242,14 +242,12 @@ jobs:
           $t = Get-Content $f -Raw -Encoding UTF8
           $orig = $t
     
-          # Remove the CPack install rule that installs bundle/win/qt.conf
           $t = [regex]::Replace(
             $t,
             '(?mi)^\s*install\s*\(\s*FILES\s+\$\{CMAKE_SOURCE_DIR\}/bundle/win/qt\.conf\s+DESTINATION\s+\.\s*\)\s*$',
             '# (CI patch) qt.conf disabled: install(FILES ${CMAKE_SOURCE_DIR}/bundle/win/qt.conf DESTINATION .)'
           )
     
-          # Remove/disable the QtConfiguration rule that writes qt.conf into QTROOT/bin
           $t = [regex]::Replace(
             $t,
             '(?mi)^\s*file\s*\(\s*WRITE\s+\$\{QTROOT\}/bin/qt\.conf\s+\$\{QTCONFCONTENT\}\s*\)\s*$',
@@ -269,6 +267,7 @@ jobs:
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
     
         Write-Host "Source patched (includes + GL compat + rendering fixes)."
+
 
     - name: Build Jellyfin Desktop
       shell: pwsh
