@@ -175,9 +175,10 @@ jobs:
           }
     
           # 5b) Port from Qt5 app: force "C" locale for mpv/ffmpeg float parsing (idempotent)
-          # Insert after: char** newArgv = appendCommandLineArguments(...)
+          # Qt6 uses: char* newArgv = ...
+          # Qt5 used: char** newArgv = ...
           if ($m -notmatch 'qputenv\("LC_NUMERIC"\s*,\s*"C"\)') {
-            $anchor = 'char\*\*\s+newArgv\s*=\s*appendCommandLineArguments\([^\)]*\);\s*'
+            $anchor = 'char\s*\*+\s+newArgv\s*=\s*appendCommandLineArguments\([^\)]*\);\s*'
             $insert =
               '$0' + $NL + $NL +
               '// Qt calls setlocale(LC_ALL, ...) internally, which can break float parsing in mpv/ffmpeg.' + $NL +
@@ -187,19 +188,15 @@ jobs:
               '#endif' + $NL + $NL
     
             $m2 = [regex]::Replace($m, $anchor, $insert, 1)
-            if ($m2 -eq $m) { throw "LC_ALL/LC_NUMERIC patch anchor not found in src/main.cpp" }
+            if ($m2 -eq $m) { throw "LC_ALL/LC_NUMERIC patch anchor not found in src/main.cpp (newArgv line not matched)" }
             $m = $m2
           }
     
           # 5c) Ensure required includes exist for forceCompatOpenGL helper (idempotent)
-          if ($m -notmatch '(?m)^\s*#include\s+<QSurfaceFormat>') {
-            $m = "#include <QSurfaceFormat>$NL$m"
-          }
-          if ($m -notmatch '(?m)^\s*#include\s+<QCoreApplication>') {
-            $m = "#include <QCoreApplication>$NL$m"
-          }
+          if ($m -notmatch '(?m)^\s*#include\s+<QSurfaceFormat>') { $m = "#include <QSurfaceFormat>$NL$m" }
+          if ($m -notmatch '(?m)^\s*#include\s+<QCoreApplication>') { $m = "#include <QCoreApplication>$NL$m" }
     
-          # 5d) Keep your existing helper insertion (Desktop OpenGL + CompatibilityProfile)
+          # 5d) Insert helper + call (Desktop OpenGL + CompatibilityProfile)
           if ($m -notmatch "forceCompatOpenGL") {
             $fn = @(
               'static void forceCompatOpenGL()',
@@ -219,11 +216,9 @@ jobs:
               ''
             ) -join $NL
     
-            # Insert helper before first "int main("
             $rxMain = [regex]::new("(?m)^\s*int\s+main\s*\(")
             $m = $rxMain.Replace($m, $fn + "int main(", 1)
     
-            # Insert call immediately after main() opening brace
             $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{)', '$1' + $NL + '    forceCompatOpenGL();', 1)
           }
     
@@ -238,7 +233,6 @@ jobs:
     
         foreach ($f in $filesToPatch) {
           if (-not (Test-Path $f)) { continue }
-    
           $t = Get-Content $f -Raw -Encoding UTF8
           $orig = $t
     
@@ -267,6 +261,7 @@ jobs:
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
     
         Write-Host "Source patched (includes + GL compat + rendering fixes)."
+
 
 
     - name: Build Jellyfin Desktop
