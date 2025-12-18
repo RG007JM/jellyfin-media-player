@@ -33,15 +33,18 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
-    - name: Cache ANGLE checkout
+    - name: ANGLE cache (checkout + out/Release)
+      id: angle-cache
       uses: actions/cache@v4
       with:
-        path: angle-src
-        key: angle-win64-${{ runner.os }}-${{ hashFiles('.github/workflows/**') }}
-        restore-keys: |
-          angle-win64-${{ runner.os }}-
+        path: |
+          angle-src/angle
+          angle-src/angle/out/Release
+        # Bump ANGLE_CACHE_VER to intentionally invalidate.
+        key: angle-win64-${{ runner.os }}-v1
 
-    - name: Build ANGLE (self-contained runtime)
+    - name: Fetch + Build ANGLE (only on cache miss)
+      if: steps.angle-cache.outputs.cache-hit != 'true'
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
@@ -50,6 +53,7 @@ jobs:
         $angleRoot = Join-Path $env:GITHUB_WORKSPACE "angle-src"
         New-Item -ItemType Directory -Force -Path $angleRoot | Out-Null
 
+        # depot_tools (small; keep in RUNNER_TEMP)
         $depot = Join-Path $env:RUNNER_TEMP "depot_tools"
         if (-not (Test-Path $depot)) {
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $depot
@@ -59,10 +63,19 @@ jobs:
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
 
-        # Keep gclient state local to the cached folder
+        # IMPORTANT: keep gclient state inside angleRoot (not your repo root)
         $env:GCLIENT_ROOT = $angleRoot
 
         $src = Join-Path $angleRoot "angle"
+
+        # If cache restored a broken/partial dir, wipe it (prevents _bad_scm loops)
+        if (Test-Path $angleRoot) {
+          if (-not (Test-Path (Join-Path $src ".git"))) {
+            Remove-Item -Recurse -Force $angleRoot
+            New-Item -ItemType Directory -Force -Path $angleRoot | Out-Null
+          }
+        }
+
         if (-not (Test-Path $src)) {
           Push-Location $angleRoot
           fetch angle
@@ -86,11 +99,11 @@ jobs:
         Copy-Item -Force (Join-Path $out "libEGL.dll")    "dep-install\bin\libEGL.dll"
         Copy-Item -Force (Join-Path $out "libGLESv2.dll") "dep-install\bin\libGLESv2.dll"
 
-        # ANGLE's Windows build copies d3dcompiler_47.dll from the Windows SDK redist. [web:10]
+        # ANGLE build files copy d3dcompiler_47.dll from the Windows SDK redist. [web:10]
         if (Test-Path (Join-Path $out "d3dcompiler_47.dll")) {
           Copy-Item -Force (Join-Path $out "d3dcompiler_47.dll") "dep-install\bin\d3dcompiler_47.dll"
         } else {
-          Write-Host "WARNING: d3dcompiler_47.dll not found in ANGLE output; build may still run if system provides it."
+          Write-Host "WARNING: d3dcompiler_47.dll not found in ANGLE output; may rely on system-provided copy."
         }
 
     - name: Prepare folders + Ninja + reuse
