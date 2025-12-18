@@ -11,7 +11,6 @@ jobs:
 
     env:
       BUILD_TYPE: Release
-      ANGLE_OUT: angle-src/angle/out/Release
 
     steps:
     - uses: actions/checkout@v4
@@ -33,6 +32,7 @@ jobs:
         [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
         echo "Cleaned Path: $env:Path"
 
+    # ---- ANGLE (cache + build) ----
     - name: ANGLE cache (checkout + out/Release)
       id: angle-cache
       uses: actions/cache@v4
@@ -40,11 +40,12 @@ jobs:
         path: |
           angle-src/angle
           angle-src/angle/out/Release
-        key: angle-win64-${{ runner.os }}-angle-main-v1
+        key: angle-win64-${{ runner.os }}-angle-main-v2
         restore-keys: |
           angle-win64-${{ runner.os }}-angle-main-
 
     - name: Fetch + Build ANGLE (isolated gclient root)
+      if: steps.angle-cache.outputs.cache-hit != 'true'
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
@@ -55,9 +56,11 @@ jobs:
 
         New-Item -ItemType Directory -Force -Path $angleRoot | Out-Null
 
+        # If a previous failed gclient run left quarantine dirs, remove them
         $bad = Join-Path $angleRoot "_bad_scm"
         if (Test-Path $bad) { Remove-Item -Recurse -Force $bad }
 
+        # depot_tools
         $depot = Join-Path $env:RUNNER_TEMP "depot_tools"
         if (-not (Test-Path $depot)) {
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git $depot
@@ -67,20 +70,21 @@ jobs:
         cmd.exe /c "update_depot_tools.bat"
         Pop-Location
 
+        # gclient root (force deterministic config each run)
         Push-Location $angleRoot
-
         @'
-        solutions = [
-          {
-            "name": "angle",
-            "url": "https://chromium.googlesource.com/angle/angle.git",
-            "deps_file": "DEPS",
-            "managed": False,
-            "custom_vars": {},
-          },
-        ]
-        '@ | Set-Content -Encoding ASCII (Join-Path $angleRoot ".gclient")
+solutions = [
+  {
+    "name": "angle",
+    "url": "https://chromium.googlesource.com/angle/angle.git",
+    "deps_file": "DEPS",
+    "managed": False,
+    "custom_vars": {},
+  },
+]
+'@ | Set-Content -Encoding ASCII (Join-Path $angleRoot ".gclient")
 
+        # If cache restored something weird, wipe it
         if (Test-Path $src) {
           if (-not (Test-Path (Join-Path $src ".git"))) {
             Remove-Item -Recurse -Force $src
@@ -92,8 +96,16 @@ jobs:
 
         if (-not (Test-Path $src)) { throw "ANGLE checkout missing at $src after gclient sync" }
 
+        # Build args via args.gn (no quoting issues)
         Push-Location $src
-        gn gen out/Release --args='is_debug=false target_cpu="x64" is_component_build=false'
+        New-Item -ItemType Directory -Force -Path "out/Release" | Out-Null
+        @'
+is_debug=false
+target_cpu="x64"
+is_component_build=false
+'@ | Set-Content -Encoding ASCII "out/Release/args.gn"
+
+        gn gen out/Release
         autoninja -C out/Release
         Pop-Location
 
@@ -103,15 +115,17 @@ jobs:
         $ErrorActionPreference = "Stop"
         $out = Join-Path $env:GITHUB_WORKSPACE "angle-src\angle\out\Release"
 
+        if (-not (Test-Path $out)) { throw "ANGLE output dir missing: $out" }
+
         New-Item -ItemType Directory -Force -Path "dep-install\bin" | Out-Null
         Copy-Item -Force (Join-Path $out "libEGL.dll")    "dep-install\bin\libEGL.dll"
         Copy-Item -Force (Join-Path $out "libGLESv2.dll") "dep-install\bin\libGLESv2.dll"
 
-        # gclient/ANGLE toolchain commonly stages this; keep if present. [web:44]
         if (Test-Path (Join-Path $out "d3dcompiler_47.dll")) {
           Copy-Item -Force (Join-Path $out "d3dcompiler_47.dll") "dep-install\bin\d3dcompiler_47.dll"
         }
 
+    # ---- Rest of deps ----
     - name: Prepare folders + Ninja + reuse
       shell: cmd
       run: |
@@ -149,7 +163,6 @@ jobs:
         target: "desktop"
         arch: "win64_msvc2022_64"
         modules: "qtwebengine qtwebchannel qtmultimedia qtpositioning qtshadertools qtimageformats qtserialport"
-      # install-qt-action provides QT_ROOT_DIR to locate Qt. [web:21][web:23]
 
     - name: Prepare SDL2
       shell: pwsh
@@ -196,18 +209,6 @@ jobs:
         Copy-Item "$binPath\libssl-3-x64.dll" "dep-install\bin\"
         Copy-Item "$binPath\libcrypto-3-x64.dll" "dep-install\bin\"
 
-    - name: Patch WiX Bundle.wxs
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = "Stop"
-        $bundle  = "bundle/win/Bundle.wxs"
-        if (Test-Path $bundle) {
-          $c = Get-Content -Raw $bundle -Encoding UTF8
-          $c = $c -replace 'Source=".*vcredist_x64.exe"', 'Source="bundle\win\vcredist_x64.exe"'
-          $c = [regex]::Replace($c, 'C:\\Program Files \(x86\)\\Microsoft Visual Studio\\(2019|2022)\\BuildTools\\VC\\Redist\\MSVC\\[^"\\]+\\vcredist_x64\.exe', 'vcredist_x64.exe')
-          Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
-        }
-
     - name: Patch Source Code (force DesktopGL + QSG diagnostics)
       shell: pwsh
       run: |
@@ -237,6 +238,7 @@ jobs:
             ('$0' + $inject),
             1
           )
+
           Set-Content -Path $main -Value $m -Encoding UTF8
         }
 
@@ -280,19 +282,15 @@ jobs:
         $outDir = "$((Get-Location).Path)\output"
         $depInstall = "$((Get-Location).Path)\dep-install"
         if (-not (Test-Path $outDir)) { throw "Output directory missing!" }
-
         if (-not $env:QT_ROOT_DIR) { throw "QT_ROOT_DIR is not set (install-qt-action env missing)" }
-        $qtBin = Join-Path $env:QT_ROOT_DIR "bin"
 
+        $qtBin = Join-Path $env:QT_ROOT_DIR "bin"
         $processExe = Join-Path $qtBin "QtWebEngineProcess.exe"
         if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
 
-        # Include ANGLE + other runtime DLLs staged in dep-install/bin
         Copy-Item -Force "$depInstall\bin\*.dll" $outDir
 
         $exePath = Join-Path $outDir "Jellyfin Desktop.exe"
-
-        # windeployqt is the supported deploy tool on Windows. [web:25]
         & "windeployqt" --release --force --qmldir src/ui --compiler-runtime --xml "$exePath"
 
         $mpvConf = Join-Path $outDir "mpv.conf"
