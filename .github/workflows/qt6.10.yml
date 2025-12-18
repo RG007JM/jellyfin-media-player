@@ -102,15 +102,13 @@ jobs:
         git clone --branch v1.1.1 https://github.com/KDE/mpvqt.git
         cd mpvqt
     
-        REM --- Existing: MpvController dtor patch (keep as-is from your workflow) ---
-        powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
+        REM --- Existing: MpvController dtor patch (keep) ---
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
         echo. >> src\mpvcontroller.cpp
         echo MpvController::~MpvController() = default; >> src\mpvcontroller.cpp
     
-        REM --- NEW: mpvqt patch to force OpenGL render API for libmpv ---
-        REM IMPORTANT: You are running under `shell: cmd`, so DO NOT use caret ^ inside the PowerShell script.
-        REM Use a single-line PowerShell -Command (semicolons) to avoid cmd line-continuation issues. [web:170]
-        powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $hit = Get-ChildItem -Recurse -File src | Select-String -Pattern 'mpv_render_context_create' -List | Select-Object -First 1; if(-not $hit){ throw 'mpvqt: mpv_render_context_create not found'; }; $path = $hit.Path; Write-Host ('mpvqt: render context create in ' + $path); $c = Get-Content $path -Raw -Encoding UTF8; if($c -match 'MPV_RENDER_PARAM_API_TYPE'){ Write-Host 'mpvqt: already sets MPV_RENDER_PARAM_API_TYPE; skipping patch'; exit 0; }; $c2 = [regex]::Replace($c, 'mpv_render_context_create\(\s*&(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)\s*;', 'mpv_render_param params[] = { { MPV_RENDER_PARAM_API_TYPE, (void*)MPV_RENDER_API_TYPE_OPENGL }, { MPV_RENDER_PARAM_INVALID, nullptr } };' + \"`r`n\" + 'mpv_render_context_create(&${1}, ${2}, params);'); if($c2 -eq $c){ throw 'mpvqt: OpenGL render API patch did not apply (callsite differs)'; }; Set-Content -Path $path -Value $c2 -Encoding UTF8; Write-Host ('mpvqt: patched OpenGL render API in ' + $path);"
+        REM --- NEW: diagnostic patch (prove whether an OpenGL context exists when mpvqt initializes) ---
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $p='src/mpvrenderer.cpp'; if(-not (Test-Path $p)){ throw 'mpvqt: src/mpvrenderer.cpp not found'; }; $t=Get-Content $p -Raw -Encoding UTF8; if($t -notmatch 'CI DIAG'){ $t=$t -replace 'QOpenGLContext \*glctx = QOpenGLContext::currentContext\(\);\s*[\r\n]+\s*if \(!glctx\) \{[\s\S]*?\}', 'QOpenGLContext *glctx = QOpenGLContext::currentContext();' + \"`r`n\" + '    if (!glctx) {' + \"`r`n\" + '        qWarning(\"(CI DIAG) mpvqt: No current OpenGL context. Qt Quick is likely running on D3D11 RHI; libmpv OpenGL renderer cannot init.\");' + \"`r`n\" + '        return nullptr;' + \"`r`n\" + '    }'; Set-Content -Path $p -Value $t -Encoding UTF8; Write-Host 'mpvqt: added OpenGL-context diagnostic'; } else { Write-Host 'mpvqt: diagnostic already present'; }"
     
         cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%" -DCMAKE_PREFIX_PATH="%INSTALL_DIR_FWD%;%Qt6_DIR%" -DECM_DIR="%INSTALL_DIR_FWD%/share/ECM/cmake" -DCMAKE_CXX_FLAGS="-I\"%INCLUDE_DIR_FWD%\""
         ninja -C build install
