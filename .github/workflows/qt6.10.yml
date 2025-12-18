@@ -86,7 +86,7 @@ jobs:
         cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR%"
         ninja -C build install
         cd ..
-        git clone --branch v1.0.0 https://github.com/KDE/mpvqt.git
+        git clone --branch v1.1.1 https://github.com/KDE/mpvqt.git
         cd mpvqt
         powershell -Command "$c = Get-Content src/mpvcontroller.h -Raw; $c = $c -replace '\s*virtual\s+~MpvController\(\).*?;', '' -replace '\s*~MpvController\(\).*?;', ''; $nl = [Environment]::NewLine; $c = $c.Replace('explicit MpvController(QObject *parent = nullptr);', 'explicit MpvController(QObject *parent = nullptr);' + $nl + '    virtual ~MpvController();'); Set-Content src/mpvcontroller.h $c"
         echo. >> src\mpvcontroller.cpp
