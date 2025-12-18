@@ -166,23 +166,18 @@ jobs:
         if (Test-Path $main) {
           $m = Get-Content $main -Raw -Encoding UTF8
     
-          # 5a) Remove forced Qt Quick backend (Qt6 file contains setGraphicsApi(OpenGL); Qt5 did not)
           $m = [regex]::Replace(
             $m,
             '^[ \t]*QQuickWindow::setGraphicsApi\(\s*QSGRendererInterface::OpenGL\s*\)\s*;\s*\r?\n',
             '',
             [System.Text.RegularExpressions.RegexOptions]::Multiline
           )
-    
-          # 5b) Remove forced shared GL contexts (Qt5 main does not set this explicitly)
           $m = [regex]::Replace(
             $m,
             '^[ \t]*QCoreApplication::setAttribute\(\s*Qt::AA_ShareOpenGLContexts\s*\)\s*;\s*\r?\n',
             '',
             [System.Text.RegularExpressions.RegexOptions]::Multiline
           )
-    
-          # 5c) Remove any workflow-injected helper + call from earlier attempts (idempotent cleanup)
           $m = [regex]::Replace(
             $m,
             '(?s)\r?\n\s*static\s+void\s+forceCompatOpenGL\s*\(\s*\)\s*\{.*?\}\s*\r?\n',
@@ -195,8 +190,6 @@ jobs:
             '',
             [System.Text.RegularExpressions.RegexOptions]::Multiline
           )
-    
-          # 5d) Remove any injected QSG_RHI_BACKEND forcing (Qt5 did not set this)
           $m = [regex]::Replace(
             $m,
             '^[ \t]*qputenv\(\s*"QSG_RHI_BACKEND"\s*,\s*".*?"\s*\)\s*;\s*\r?\n',
@@ -207,7 +200,7 @@ jobs:
           Set-Content -Path $main -Value $m -Encoding UTF8
         }
     
-        # 6) Remove qt.conf install + generation (required if qt.conf is deleted everywhere)
+        # 6) Remove qt.conf install + generation
         $filesToPatch = @(
           "CMakeModules/CPackConfiguration.cmake",
           "CMakeModules/QtConfiguration.cmake"
@@ -224,7 +217,6 @@ jobs:
             '(?mi)^\s*install\s*\(\s*FILES\s+\$\{CMAKE_SOURCE_DIR\}/bundle/win/qt\.conf\s+DESTINATION\s+\.\s*\)\s*$',
             '# (CI patch) qt.conf disabled: install(FILES ${CMAKE_SOURCE_DIR}/bundle/win/qt.conf DESTINATION .)'
           )
-    
           $t = [regex]::Replace(
             $t,
             '(?mi)^\s*file\s*\(\s*WRITE\s+\$\{QTROOT\}/bin/qt\.conf\s+\$\{QTCONFCONTENT\}\s*\)\s*$',
@@ -234,35 +226,51 @@ jobs:
           if ($t -ne $orig) {
             Set-Content -Path $f -Value $t -Encoding UTF8
             Write-Host "Patched $f to disable qt.conf"
-          } else {
-            Write-Host "No qt.conf rule matched in $f (nothing changed)"
           }
         }
     
-        # 7) Remove qt.conf files from repo tree (optional but matches "remove everywhere")
+        # 7) Remove qt.conf files from repo tree
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
         Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
     
-        # 8) MpvVideoItem.cpp: defer vo=libmpv until MpvAbstractItem::ready (fix "No render context set")
+        # 8) MpvVideoItem.cpp: do NOT set vo=libmpv in ctor; set it slightly later than ready using QTimer
         $mpvItem = "src/player/MpvVideoItem.cpp"
         if (Test-Path $mpvItem) {
           $t = Get-Content $mpvItem -Raw -Encoding UTF8
           $orig = $t
     
-          # Remove constructor-time vo=libmpv (supports Q_EMIT / QEMIT)
+          # 8a) Remove constructor-time vo=libmpv (supports Q_EMIT / QEMIT)
           $t = [regex]::Replace(
             $t,
             '(?m)^\s*Q_?EMIT\s+setProperty\(\s*"vo"\s*,\s*"libmpv"\s*\)\s*;\s*$',
-            '    // (CI patch) Do not set vo=libmpv in constructor; wait for MpvAbstractItem::ready.'
+            '    // (CI patch) Do not set vo=libmpv in constructor; wait until the item is truly renderable.'
           )
     
-          # Insert vo=libmpv right before PlayerComponent initialization (before setMpvController)
-          if ($t -notmatch 'CI patch\)\s*Set vo=libmpv on ready') {
+          # 8b) Ensure QTimer include exists
+          if ($t -notmatch '(?m)^\s*#include\s+<QTimer>\s*$') {
+            $t = [regex]::Replace(
+              $t,
+              '(?m)^(#include\s+<QDebug>\s*\r?\n)',
+              ('$1#include <QTimer>' + $NL),
+              1
+            )
+          }
+    
+          # 8c) Remove any previous "Set vo=libmpv on ready" injection (cleanup)
+          $t = [regex]::Replace(
+            $t,
+            '(?m)^\s*// \(CI patch\) Set vo=libmpv on ready.*\r?\n\s*Q_?EMIT\s+setProperty\(\s*"vo"\s*,\s*"libmpv"\s*\)\s*;\s*\r?\n',
+            ''
+          )
+    
+          # 8d) Inject a delayed setter just before setMpvController (runs inside ready handler)
+          if ($t -notmatch 'CI patch\)\s*Delayed vo=libmpv') {
             $t = [regex]::Replace(
               $t,
               '(?m)^(\s*)mplayer->setMpvController\(mpvController\);\s*$',
-              ('$1// (CI patch) Set vo=libmpv on ready (render context should exist now).' + $NL +
-               '$1Q_EMIT setProperty("vo", "libmpv");' + $NL +
+              ('$1// (CI patch) Delayed vo=libmpv: ready can fire before render context exists (Qt6/Qt Quick).' + $NL +
+               '$1QTimer::singleShot(0, this, [this]() { Q_EMIT setProperty("vo", "libmpv"); });' + $NL +
+               '$1QTimer::singleShot(50, this, [this]() { Q_EMIT setProperty("vo", "libmpv"); });' + $NL +
                '$1mplayer->setMpvController(mpvController);'),
               1
             )
@@ -275,7 +283,7 @@ jobs:
           }
         }
     
-        # 9) PlayerComponent.cpp: queue early play requests until mpv is ready, then replay (single authoritative patch)
+        # 9) PlayerComponent.cpp: pending queue + replay after initializeMpv (queued)
         $pc = "src/player/PlayerComponent.cpp"
         if (Test-Path $pc) {
           $p = Get-Content $pc -Raw -Encoding UTF8
@@ -299,12 +307,20 @@ jobs:
             $mInc = $rxInc.Match($p)
             if ($mInc.Success) {
               $p = $mInc.Groups[1].Value + $globals + $p.Substring($mInc.Groups[1].Length)
-            } else {
-              Write-Host "PlayerComponent.cpp: include anchor not found; skipping globals insert"
             }
           }
     
-          # 9b) Modify queueMedia(): if (!m_mpv) store pending request and return (idempotent)
+          # Ensure QTimer include exists
+          if ($p -notmatch '(?m)^\s*#include\s+<QTimer>\s*$') {
+            $p = [regex]::Replace(
+              $p,
+              '(?m)^(#include\s+<QRegularExpression>\s*\r?\n)',
+              ('$1#include <QTimer>' + $NL),
+              1
+            )
+          }
+    
+          # 9b) queueMedia(): if (!m_mpv) store pending request and return
           if ($p -notmatch 'mpv not initialized yet; queueing request') {
             $p = [regex]::Replace(
               $p,
@@ -331,7 +347,7 @@ jobs:
             )
           }
     
-          # 9c) After initializeMpv emits onMpvEvents(): replay pending request ONCE (queued to next event loop tick)
+          # 9c) After initializeMpv emits onMpvEvents(): replay pending request once (queued)
           if ($p -notmatch 'CI patch\)\s*replay pending media') {
             $p = [regex]::Replace(
               $p,
@@ -351,39 +367,21 @@ jobs:
             )
           }
     
-          # Ensure QTimer is available (only add once, near other includes)
-          if ($p -notmatch '(?m)^\s*#include\s+<QTimer>\s*$') {
-            $p = [regex]::Replace(
-              $p,
-              '(?m)^(#include\s+<QRegularExpression>\s*\r?\n)',
-              ('$1#include <QTimer>' + $NL),
-              1
-            )
-          }
-    
           if ($p -ne $origp) {
             Set-Content -Path $pc -Value $p -Encoding UTF8
-          } else {
-            Write-Host "PlayerComponent.cpp: no changes (already patched?)"
           }
         }
     
         # 10) Checks
-        Write-Host "---- main.cpp forced API check ----"
-        Select-String -Path "src/main.cpp" -Pattern "setGraphicsApi","QSG_RHI_BACKEND","AA_ShareOpenGLContexts","forceCompatOpenGL" -SimpleMatch -List | ForEach-Object { $_.Line }
-        Write-Host "-----------------------------------"
-    
         Write-Host "---- MpvVideoItem.cpp check ----"
-        Select-String -Path "src/player/MpvVideoItem.cpp" -SimpleMatch -Pattern 'setProperty("vo", "libmpv")','CI patch' | ForEach-Object { $_.Line }
+        Select-String -Path "src/player/MpvVideoItem.cpp" -SimpleMatch -Pattern 'setProperty("vo", "libmpv")','Delayed vo=libmpv','QTimer::singleShot' | ForEach-Object { Write-Host $_.Line }
         Write-Host "--------------------------------"
     
         Write-Host "---- PlayerComponent.cpp check ----"
-        Select-String -Path "src/player/PlayerComponent.cpp" -SimpleMatch -Pattern "mpv not initialized yet; queueing request","replay pending media request now that mpv is ready","QTimer::singleShot" | ForEach-Object { $_.Line }
+        Select-String -Path "src/player/PlayerComponent.cpp" -SimpleMatch -Pattern "mpv not initialized yet; queueing request","replay pending media request now that mpv is ready","QTimer::singleShot" | ForEach-Object { Write-Host $_.Line }
         Write-Host "-----------------------------------"
     
-        Write-Host "Source patched (no forced graphics API; libmpv vo deferred; pending queue enabled)."
-
-
+        Write-Host "Source patched (no forced graphics API; vo=libmpv delayed; pending queue enabled)."
 
     - name: Build Jellyfin Desktop
       shell: pwsh
