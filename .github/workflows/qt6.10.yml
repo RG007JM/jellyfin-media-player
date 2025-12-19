@@ -1,4 +1,4 @@
-name: Build Qt6.10 Windows x64 (cleaned)
+name: Build Qt6.10 Windows x64 (clean + qt.conf eliminated)
 
 on:
   workflow_dispatch:
@@ -15,7 +15,14 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Prepare Libmpv (User Provided v3 URL)
+    - name: Remove bundled qt.conf (source)
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
+        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
+
+    - name: Prepare Libmpv
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Force -Path "dep-install/bin", "dep-install/lib", "dep-install/include"
@@ -107,10 +114,10 @@ jobs:
           Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (minimal)
+    - name: Patch Source Code (minimal + qt.conf elimination)
       shell: pwsh
       run: |
-        # 1) Patch src/CMakeLists.txt (strip mpris/taskbar & remove DBus/WinExtras linkage)
+        # --- existing minimal source fixes ---
         $cmakeFile = "src/CMakeLists.txt"
         $content = Get-Content $cmakeFile -Raw
         $content = [regex]::Replace($content, '(?mi)^.*mpris.*$', '')
@@ -118,7 +125,6 @@ jobs:
         $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
         Set-Content $cmakeFile $content -Encoding UTF8
 
-        # 2) Patch src/core/ComponentManager.cpp (strip Mpris/Taskbar)
         $compMgr = "src/core/ComponentManager.cpp"
         $compContent = Get-Content $compMgr -Raw
         $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*MprisComponent\.h.*$', '')
@@ -127,7 +133,6 @@ jobs:
         $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
         Set-Content $compMgr $compContent -Encoding UTF8
 
-        # 3) Patch src/ui/WindowManager.cpp (strip Taskbar usage)
         $winMgr = "src/ui/WindowManager.cpp"
         if (Test-Path $winMgr) {
           $winContent = Get-Content $winMgr -Raw
@@ -135,7 +140,6 @@ jobs:
           Set-Content $winMgr $winContent -Encoding UTF8
         }
 
-        # 4) CodecsComponent.cpp: ensure windows.h is included (idempotent)
         $codecs = "src/player/CodecsComponent.cpp"
         $c = Get-Content $codecs -Raw
         if ($c -notmatch '#include\s+<windows\.h>') {
@@ -143,38 +147,36 @@ jobs:
           Set-Content $codecs $c -Encoding UTF8
         }
 
-        # 5) main.cpp: force Desktop OpenGL + CompatibilityProfile (idempotent)
-        $main = "src/main.cpp"
-        if (Test-Path $main) {
-          $m = Get-Content $main -Raw -Encoding UTF8
-          if ($m -notmatch "forceCompatOpenGL") {
-            if ($m -notmatch '#include\s+<QSurfaceFormat>') { $m = "#include <QSurfaceFormat>`r`n" + $m }
-            if ($m -notmatch '#include\s+<QCoreApplication>') { $m = "#include <QCoreApplication>`r`n" + $m }
+        $filesToPatch = @(
+          "CMakeModules/CPackConfiguration.cmake",
+          "CMakeModules/QtConfiguration.cmake"
+        )
 
-            $fn = @(
-              'static void forceCompatOpenGL()'
-              '{'
-              '    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);'
-              '    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);'
-              ''
-              '    QSurfaceFormat fmt;'
-              '    fmt.setRenderableType(QSurfaceFormat::OpenGL);'
-              '    fmt.setVersion(3, 3);'
-              '    fmt.setProfile(QSurfaceFormat::CompatibilityProfile);'
-              '    fmt.setDepthBufferSize(24);'
-              '    fmt.setStencilBufferSize(8);'
-              '    QSurfaceFormat::setDefaultFormat(fmt);'
-              '}'
-              ''
-              ''
-            ) -join "`r`n"
+        foreach ($f in $filesToPatch) {
+          if (-not (Test-Path $f)) { continue }
 
-            $rxMain = [regex]::new("(?m)^\s*int\s+main\s*\(")
-            $m = $rxMain.Replace($m, $fn + "int main(", 1)
-            $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{)', '$1' + "`r`n    forceCompatOpenGL();", 1)
-            Set-Content $main $m -Encoding UTF8
+          $t = Get-Content $f -Raw -Encoding UTF8
+          $orig = $t
+
+          $t = [regex]::Replace(
+            $t,
+            '(?mi)^\s*install\s*\(\s*FILES\s+\$\{CMAKE_SOURCE_DIR\}/bundle/win/qt\.conf\s+DESTINATION\s+\.\s*\)\s*$',
+            '# (CI patch) qt.conf disabled'
+          )
+
+          $t = [regex]::Replace(
+            $t,
+            '(?mi)^\s*file\s*\(\s*WRITE\s+\$\{QTROOT\}/bin/qt\.conf\s+\$\{QTCONFCONTENT\}\s*\)\s*$',
+            '# (CI patch) qt.conf disabled'
+          )
+
+          if ($t -ne $orig) {
+            Set-Content -Path $f -Value $t -Encoding UTF8
           }
         }
+
+        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
+        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
 
     - name: Build Jellyfin Desktop
       shell: pwsh
@@ -245,6 +247,10 @@ jobs:
 
         Write-Host "Running windeployqt..."
         & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
+
+        # Remove qt.conf if windeployqt generated it anyway (restored behavior)
+        if (Test-Path "$outDir\qt.conf")  { Remove-Item -Force "$outDir\qt.conf" }
+        if (Test-Path "$outDir\.qt.conf") { Remove-Item -Force "$outDir\.qt.conf" }
 
         Write-Host "--- Output Dir ---"
         Get-ChildItem $outDir | Select-Object Name,Length
