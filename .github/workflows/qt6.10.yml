@@ -1,4 +1,4 @@
-name: Build Qt6.10 Windows x64 (Auto software fallback 8s)
+name: Build Qt6.10 Windows x64 (cleaned)
 
 on:
   workflow_dispatch:
@@ -14,20 +14,6 @@ jobs:
     - uses: actions/checkout@v4
       with:
         submodules: recursive
-
-    - name: Remove bundled qt.conf (source)
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = "Stop"
-        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
-        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
-
-    - name: Nuke MinGW and Path Contamination
-      shell: pwsh
-      run: |
-        $path = $env:Path -split ';' | Where-Object { $_ -notmatch 'mingw' -and $_ -notmatch 'strawberry' }
-        [Environment]::SetEnvironmentVariable("Path", ($path -join ';'), "Process")
-        echo "Cleaned Path: $env:Path"
 
     - name: Prepare Libmpv (User Provided v3 URL)
       shell: pwsh
@@ -121,10 +107,10 @@ jobs:
           Set-Content -LiteralPath $bundle -Value $c -Encoding UTF8
         }
 
-    - name: Patch Source Code (Include Fix + GL Compat + Auto fallback 8s)
+    - name: Patch Source Code (minimal)
       shell: pwsh
       run: |
-        # 1) Patch src/CMakeLists.txt
+        # 1) Patch src/CMakeLists.txt (strip mpris/taskbar & remove DBus/WinExtras linkage)
         $cmakeFile = "src/CMakeLists.txt"
         $content = Get-Content $cmakeFile -Raw
         $content = [regex]::Replace($content, '(?mi)^.*mpris.*$', '')
@@ -132,7 +118,7 @@ jobs:
         $content = $content.Replace('Qt6::DBus', '').Replace('Qt6::WinExtras', '')
         Set-Content $cmakeFile $content -Encoding UTF8
 
-        # 2) Patch src/core/ComponentManager.cpp
+        # 2) Patch src/core/ComponentManager.cpp (strip Mpris/Taskbar)
         $compMgr = "src/core/ComponentManager.cpp"
         $compContent = Get-Content $compMgr -Raw
         $compContent = [regex]::Replace($compContent, '(?mi)^#include\s+.*MprisComponent\.h.*$', '')
@@ -141,7 +127,7 @@ jobs:
         $compContent = [regex]::Replace($compContent, '(?mi)^.*TaskbarComponent.*$', '')
         Set-Content $compMgr $compContent -Encoding UTF8
 
-        # 3) Patch src/ui/WindowManager.cpp
+        # 3) Patch src/ui/WindowManager.cpp (strip Taskbar usage)
         $winMgr = "src/ui/WindowManager.cpp"
         if (Test-Path $winMgr) {
           $winContent = Get-Content $winMgr -Raw
@@ -157,18 +143,14 @@ jobs:
           Set-Content $codecs $c -Encoding UTF8
         }
 
-        # 5) main.cpp: force Desktop OpenGL compat + auto software fallback (8s watchdog)
+        # 5) main.cpp: force Desktop OpenGL + CompatibilityProfile (idempotent)
         $main = "src/main.cpp"
         if (Test-Path $main) {
           $m = Get-Content $main -Raw -Encoding UTF8
-
-          if ($m -notmatch '#include\s+<QSurfaceFormat>') { $m = "#include <QSurfaceFormat>`r`n" + $m }
-          if ($m -notmatch '#include\s+<QCoreApplication>') { $m = "#include <QCoreApplication>`r`n" + $m }
-          if ($m -notmatch '#include\s+<QProcess>') { $m = "#include <QProcess>`r`n" + $m }
-          if ($m -notmatch '#include\s+<QTimer>') { $m = "#include <QTimer>`r`n" + $m }
-          if ($m -notmatch '#include\s+<windows\.h>') { $m = "#include <windows.h>`r`n" + $m }
-
           if ($m -notmatch "forceCompatOpenGL") {
+            if ($m -notmatch '#include\s+<QSurfaceFormat>') { $m = "#include <QSurfaceFormat>`r`n" + $m }
+            if ($m -notmatch '#include\s+<QCoreApplication>') { $m = "#include <QCoreApplication>`r`n" + $m }
+
             $fn = @(
               'static void forceCompatOpenGL()'
               '{'
@@ -185,80 +167,14 @@ jobs:
               '}'
               ''
               ''
-              'static bool relaunchSoftwareFallback(char **argv)'
-              '{'
-              '    if (qEnvironmentVariableIsSet("JFD_SOFTWARE_FALLBACK")) {'
-              '        return false;'
-              '    }'
-              '    qputenv("JFD_SOFTWARE_FALLBACK", "1");'
-              '    qputenv("QT_QUICK_BACKEND", "software");'
-              '    qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu-compositing");'
-              ''
-              '    QString program = QCoreApplication::applicationFilePath();'
-              '    QStringList args;'
-              '    for (int i = 1; argv && argv[i]; ++i) {'
-              '        args << QString::fromLocal8Bit(argv[i]);'
-              '    }'
-              '    return QProcess::startDetached(program, args);'
-              '}'
-              ''
-              ''
             ) -join "`r`n"
 
             $rxMain = [regex]::new("(?m)^\s*int\s+main\s*\(")
             $m = $rxMain.Replace($m, $fn + "int main(", 1)
-          }
-
-          if ($m -notmatch "forceCompatOpenGL\(\);") {
             $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{)', '$1' + "`r`n    forceCompatOpenGL();", 1)
+            Set-Content $main $m -Encoding UTF8
           }
-
-          if ($m -notmatch "JFD_FALLBACK_WATCHDOG") {
-            $inject = @(
-              '    // If we were relaunched in fallback mode, force software before QtQuick/WebEngine init.'
-              '    if (qEnvironmentVariableIsSet("JFD_SOFTWARE_FALLBACK")) {'
-              '        qputenv("QT_QUICK_BACKEND", "software");'
-              '        qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu-compositing");'
-              '    }'
-              ''
-              '    // JFD_FALLBACK_WATCHDOG: black-screen/hang heuristic (8s).'
-              '    if (!qEnvironmentVariableIsSet("JFD_SOFTWARE_FALLBACK")) {'
-              '        QTimer::singleShot(8000, [argv]() {'
-              '            relaunchSoftwareFallback(argv);'
-              '            ::ExitProcess(0);'
-              '        });'
-              '    }'
-              ''
-            ) -join "`r`n"
-
-            $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{\s*)', '$1' + "`r`n" + $inject, 1)
-          }
-
-          Set-Content $main $m -Encoding UTF8
         }
-
-        # 6) Remove qt.conf install + generation
-        $filesToPatch = @(
-          "CMakeModules/CPackConfiguration.cmake",
-          "CMakeModules/QtConfiguration.cmake"
-        )
-        foreach ($f in $filesToPatch) {
-          if (-not (Test-Path $f)) { continue }
-          $t = Get-Content $f -Raw -Encoding UTF8
-          $orig = $t
-          $t = [regex]::Replace($t,
-            '(?mi)^\s*install\s*\(\s*FILES\s+\$\{CMAKE_SOURCE_DIR\}/bundle/win/qt\.conf\s+DESTINATION\s+\.\s*\)\s*$',
-            '# (CI patch) qt.conf disabled'
-          )
-          $t = [regex]::Replace($t,
-            '(?mi)^\s*file\s*\(\s*WRITE\s+\$\{QTROOT\}/bin/qt\.conf\s+\$\{QTCONFCONTENT\}\s*\)\s*$',
-            '# (CI patch) qt.conf disabled'
-          )
-          if ($t -ne $orig) { Set-Content -Path $f -Value $t -Encoding UTF8 }
-        }
-
-        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\qt.conf"
-        Remove-Item -Force -ErrorAction SilentlyContinue "bundle\win\.qt.conf"
 
     - name: Build Jellyfin Desktop
       shell: pwsh
@@ -307,43 +223,31 @@ jobs:
         if (-not (Test-Path $qtBin)) { throw "Qt bin path not found: $qtBin (QT_ROOT_DIR=$qtRootDir)" }
         $qtRoot = Split-Path $qtBin -Parent
 
-        $qtDlls = @(
-          "Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll","Qt6Network.dll",
-          "Qt6Quick.dll","Qt6Qml.dll","Qt6Svg.dll","Qt6OpenGL.dll",
-          "Qt6QmlModels.dll","Qt6QmlWorkerScript.dll",
-          "Qt6WebEngineCore.dll","Qt6WebEngineQuick.dll"
-        )
-        foreach ($q in $qtDlls) {
-          $src = Join-Path $qtBin $q
-          if (Test-Path $src) { Copy-Item -Force $src $outDir }
-        }
-
+        # QtWebEngine resources folder is required for WebEngine to run.
         $resSrc = Join-Path $qtRoot "resources"
         if (Test-Path $resSrc) {
           New-Item -ItemType Directory -Force -Path (Join-Path $outDir "resources") | Out-Null
           Copy-Item -Force -Recurse (Join-Path $resSrc "*") (Join-Path $outDir "resources")
+        } else {
+          throw "Qt resources folder not found: $resSrc"
         }
 
         $processExe = Join-Path $qtBin "QtWebEngineProcess.exe"
         if (Test-Path $processExe) { Copy-Item -Force $processExe $outDir }
+        else { throw "QtWebEngineProcess.exe not found: $processExe" }
 
+        # App deps (mpv, SDL, OpenSSL, etc.)
         Copy-Item -Force "$depInstall/bin/*.dll" $outDir
 
         $exePath = Join-Path $outDir "Jellyfin Desktop.exe"
         $qmlArgs = @()
         if (Test-Path "$depInstall/lib/qml") { $qmlArgs += "--qmlimport"; $qmlArgs += "$depInstall/lib/qml" }
 
+        Write-Host "Running windeployqt..."
         & "windeployqt" --release --force --qmldir src/ui @qmlArgs --compiler-runtime --xml "$exePath"
 
-        if (Test-Path "$outDir\qt.conf")  { Remove-Item -Force "$outDir\qt.conf" }
-        if (Test-Path "$outDir\.qt.conf") { Remove-Item -Force "$outDir\.qt.conf" }
-
-        $vcRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC"
-        $runtimeDll = Get-ChildItem -Path $vcRoot -Recurse -Filter "vcruntime140.dll" | Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
-        if ($runtimeDll) {
-          $redistDir = $runtimeDll.DirectoryName
-          Copy-Item -Force "$redistDir\*.dll" $outDir
-        }
+        Write-Host "--- Output Dir ---"
+        Get-ChildItem $outDir | Select-Object Name,Length
 
     - name: Create Portable Zip
       shell: pwsh
