@@ -1,4 +1,4 @@
-name: Build Qt6.10 Windows x64 (clean + qt.conf eliminated)
+name: Build Qt6.10 Windows x64
 
 on:
   workflow_dispatch:
@@ -147,6 +147,37 @@ jobs:
           Set-Content $codecs $c -Encoding UTF8
         }
 
+        $main = "src/main.cpp"
+        if (Test-Path $main) {
+          $m = Get-Content $main -Raw -Encoding UTF8
+          if ($m -notmatch "forceCompatOpenGL") {
+            if ($m -notmatch '#include\s+<QSurfaceFormat>') { $m = "#include <QSurfaceFormat>`r`n" + $m }
+            if ($m -notmatch '#include\s+<QCoreApplication>') { $m = "#include <QCoreApplication>`r`n" + $m }
+            $fn = @(
+              'static void forceCompatOpenGL()'
+              '{'
+              '    QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);'
+              '    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);'
+              ''
+              '    QSurfaceFormat fmt;'
+              '    fmt.setRenderableType(QSurfaceFormat::OpenGL);'
+              '    fmt.setVersion(3, 3);'
+              '    fmt.setProfile(QSurfaceFormat::CompatibilityProfile);'
+              '    fmt.setDepthBufferSize(24);'
+              '    fmt.setStencilBufferSize(8);'
+              '    QSurfaceFormat::setDefaultFormat(fmt);'
+              '}'
+              ''
+              ''
+            ) -join "`r`n"
+            $rxMain = [regex]::new("(?m)^\s*int\s+main\s*\(")
+            $m = $rxMain.Replace($m, $fn + "int main(", 1)
+            $m = [regex]::Replace($m, '(?s)(int\s+main\s*\([^\)]*\)\s*\{)', '$1' + "`r`n    forceCompatOpenGL();", 1)
+            Set-Content $main $m -Encoding UTF8
+          }
+        }
+
+        # --- qt.conf elimination (restored) ---
         $filesToPatch = @(
           "CMakeModules/CPackConfiguration.cmake",
           "CMakeModules/QtConfiguration.cmake"
